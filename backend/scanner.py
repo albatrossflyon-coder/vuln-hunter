@@ -36,20 +36,57 @@ def _semgrep_executable() -> str:
     return str(candidate) if candidate.exists() else "semgrep"
 
 
-def run_scan(target_path: str, configs: List[str] | None = None) -> List[Dict[str, Any]]:
-    """Run semgrep against target_path, return parsed findings with real code context.
+def get_changed_files(repo_path: str, base_ref: str = "HEAD") -> List[str]:
+    """Files changed vs base_ref (a branch, tag, or commit SHA), as absolute paths.
+
+    base_ref="HEAD" diffs against the last commit (i.e. uncommitted changes).
+    Use a branch name (e.g. "main") to diff a feature branch for PR-style scans.
+
+    `git diff` alone only reports changes to already-tracked files -- brand new,
+    never-`git add`ed files are invisible to it by design. Since "scan what I'm
+    about to commit" is the main use case, untracked files are unioned in too.
+    """
+    diff_cmd = ["git", "-C", repo_path, "diff", "--name-only", "--diff-filter=ACMR", base_ref]
+    diff_result = subprocess.run(diff_cmd, capture_output=True, text=True, timeout=30)
+    if diff_result.returncode != 0:
+        raise RuntimeError(f"git diff failed (is this a git repo? is '{base_ref}' a valid ref?): {diff_result.stderr[:500]}")
+
+    untracked_cmd = ["git", "-C", repo_path, "ls-files", "--others", "--exclude-standard"]
+    untracked_result = subprocess.run(untracked_cmd, capture_output=True, text=True, timeout=30)
+
+    relative_paths = set(diff_result.stdout.splitlines()) | set(untracked_result.stdout.splitlines())
+
+    root = Path(repo_path)
+    changed = []
+    for line in relative_paths:
+        line = line.strip()
+        if not line:
+            continue
+        full_path = root / line
+        if full_path.exists():  # skip deleted files, nothing to scan
+            changed.append(str(full_path))
+    return changed
+
+
+def run_scan(target_path: str, configs: List[str] | None = None, files: List[str] | None = None) -> List[Dict[str, Any]]:
+    """Run semgrep against target_path (or, if `files` is given, only those specific
+    files — used for diff-only scans), return parsed findings with real code context.
 
     Sensitive files (NEVER_READ_PATTERNS) are excluded from the semgrep target
     selection itself, so their content is never read or matched in the first
     place — not just filtered out of the results afterward.
     """
+    if files is not None and len(files) == 0:
+        return []  # diff-only scan with zero changed files -> nothing to scan, not "scan everything"
+
     configs = configs or DEFAULT_CONFIGS
     cmd = [_semgrep_executable(), "scan"]
     for config in configs:
         cmd += ["--config", config]
     for pattern in NEVER_READ_PATTERNS:
         cmd += ["--exclude", pattern]
-    cmd += [target_path, "--json", "--quiet"]
+    cmd += files if files is not None else [target_path]
+    cmd += ["--json", "--quiet"]
 
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     if result.returncode not in (0, 1):  # semgrep exits 1 when findings exist
@@ -72,6 +109,7 @@ def _enrich_with_source(item: Dict[str, Any]) -> Dict[str, Any]:
     end_line = item["end"]["line"]
 
     snippet = ""
+    matched_code = ""
     if path.exists() and not _is_never_read(path):
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         context_start = max(0, start_line - 4)
@@ -79,6 +117,9 @@ def _enrich_with_source(item: Dict[str, Any]) -> Dict[str, Any]:
         snippet = "\n".join(
             f"{i + 1}: {lines[i]}" for i in range(context_start, context_end)
         )
+        # Just the matched lines, no padding — used for fingerprinting so that
+        # unrelated edits near (not in) the vulnerable code don't change identity.
+        matched_code = "\n".join(lines[start_line - 1 : end_line])
 
     return {
         "rule_id": item["check_id"],
@@ -90,6 +131,7 @@ def _enrich_with_source(item: Dict[str, Any]) -> Dict[str, Any]:
         "cwe": _as_string(item["extra"].get("metadata", {}).get("cwe")),
         "owasp": _as_string(item["extra"].get("metadata", {}).get("owasp")),
         "snippet": snippet,
+        "matched_code": matched_code,
     }
 
 

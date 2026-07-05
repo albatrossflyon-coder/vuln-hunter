@@ -64,7 +64,7 @@ def triage_finding(finding: Dict[str, Any], model: str = "claude-sonnet-4-6") ->
     text = "".join(block.text for block in response.content if block.type == "text").strip()
     parsed = _parse_json_response(text)
 
-    return {**finding, **parsed}
+    return {**finding, **parsed, "finding_type": "rule_confirmed"}
 
 
 def triage_all(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

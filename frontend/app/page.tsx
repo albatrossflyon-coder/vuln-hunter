@@ -15,9 +15,12 @@ type Finding = {
   cwe: string | null;
   owasp: string | null;
   snippet: string;
+  matched_code: string;
   explanation: string;
   exploitability: string;
   suggested_fix: string;
+  fingerprint: string;
+  finding_type: string;
 };
 
 const EXPLOITABILITY_STYLES: Record<string, string> = {
@@ -34,6 +37,30 @@ export default function Home() {
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [ignoring, setIgnoring] = useState<string | null>(null);
+
+  async function ignoreFinding(f: Finding) {
+    setIgnoring(f.fingerprint);
+    try {
+      const res = await fetch(`${API_URL}/ignore`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          repo_path: repoPath.trim(),
+          fingerprint: f.fingerprint,
+          rule_id: f.rule_id,
+          path: f.path,
+          reason: "marked safe from dashboard",
+        }),
+      });
+      if (!res.ok) throw new Error("Failed to ignore finding");
+      setFindings((prev) => (prev ? prev.filter((x) => x.fingerprint !== f.fingerprint) : prev));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to ignore finding");
+    } finally {
+      setIgnoring(null);
+    }
+  }
 
   async function runScan() {
     const path = repoPath.trim();
@@ -115,6 +142,14 @@ export default function Home() {
               className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
             >
               <div className="flex items-center gap-3">
+                {f.finding_type === "ai_reasoning" && (
+                  <span
+                    className="rounded border border-purple-400 px-2 py-0.5 text-xs font-bold uppercase text-purple-700"
+                    title="AI-inferred business-logic concern, not a rule match — needs human review"
+                  >
+                    AI review
+                  </span>
+                )}
                 <span
                   className={`rounded px-2 py-0.5 text-xs font-bold uppercase ${
                     EXPLOITABILITY_STYLES[f.exploitability] ?? EXPLOITABILITY_STYLES.unknown
@@ -154,6 +189,13 @@ export default function Home() {
                     {f.owasp && <div>OWASP: {f.owasp}</div>}
                   </div>
                 )}
+                <button
+                  onClick={() => ignoreFinding(f)}
+                  disabled={ignoring === f.fingerprint}
+                  className="rounded border border-black/20 px-3 py-1 text-xs font-bold uppercase disabled:opacity-40"
+                >
+                  {ignoring === f.fingerprint ? "Ignoring…" : "Mark safe / ignore"}
+                </button>
               </div>
             )}
           </div>
