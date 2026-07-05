@@ -1,5 +1,7 @@
 # Build Log — vuln-hunter
 
+**Repo**: C:\Repos\vuln-hunter | github.com/albatrossflyon-coder/vuln-hunter (public)
+
 AI-assisted security code reviewer. Hybrid architecture: real static analysis
 (Semgrep) for ground-truth vulnerability detection, Claude for triage,
 exploitability assessment, and fix suggestions.
