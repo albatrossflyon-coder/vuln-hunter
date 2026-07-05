@@ -85,8 +85,32 @@ invents a finding that Semgrep didn't already flag.
 **Status**: backend + frontend both run and are verified correct locally.
 Not deployed, not on GitHub yet.
 
+### 2026-07-05 — Never-read guarantee for credential files
+
+Before pointing this at other real repos (job-hunter, rag-system, etc.), added
+an explicit, defense-in-depth guarantee that sensitive files are never read —
+not just relied on `.gitignore` being correct in the target repo, which isn't
+a real guarantee (a `.env` could exist un-gitignored, or the target might not
+even be a git repo).
+
+- **`scanner.py`**: `NEVER_READ_PATTERNS` (`.env`, `.env.*`, `*.pem`, `*.key`,
+  `*.pfx`, `*.p12`, `id_rsa`/`id_ed25519` (+ `.pub`), `credentials.json`,
+  `secrets.json`/`.yml`/`.yaml`, `.npmrc`, `.git-credentials`, `known_hosts`).
+  Enforced at **three layers**: (1) passed as `--exclude` flags to semgrep
+  itself, so the file's content is never read into the analysis engine at
+  all — confirmed via semgrep's own `paths.scanned` list, not just our
+  results; (2) a defensive filter on returned findings in case anything
+  slipped past layer 1; (3) the same check directly at the source-snippet
+  read call site in `_enrich_with_source()`.
+- **`test_never_read_manual.py`**: automated regression test — creates fake
+  `.env`/`credentials.json`/`id_rsa` fixtures in a temp dir (not committed,
+  so nothing secret-shaped ends up in git), scans it, asserts the real
+  vulnerability is still caught while none of the sensitive files appear in
+  any finding. Verified passing.
+
 ## Pending
 - [ ] Push to GitHub
 - [ ] Consider an MCP server layer (same pattern as rag-system) if useful
 - [ ] Deploy backend + frontend
 - [ ] Extend custom rules beyond Python (JS/TS at minimum, given the frontend-dev angle)
+- [ ] Run against other real repos (job-hunter, rag-system, skinstric, etc.) now that the never-read guarantee is in place
