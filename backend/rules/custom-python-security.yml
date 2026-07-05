@@ -1,0 +1,48 @@
+rules:
+  - id: sql-injection-string-concat
+    languages: [python]
+    severity: ERROR
+    message: >
+      SQL query built via string concatenation or f-string with a variable, then passed
+      to execute(). This allows SQL injection if the variable comes from user input.
+      Use parameterized queries instead: cursor.execute("... WHERE x = ?", (value,))
+    metadata:
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command"
+      owasp: "A03:2021 - Injection"
+    patterns:
+      - pattern-either:
+          - pattern: $CURSOR.execute($A + $B)
+          - pattern: $CURSOR.execute(f"...{$B}...")
+          - pattern: |
+              $QUERY = "..." + $B + "..."
+              ...
+              $CURSOR.execute($QUERY)
+      - pattern-not: $CURSOR.execute("...", (...))
+
+  - id: shell-injection-os-system
+    languages: [python]
+    severity: ERROR
+    message: >
+      os.system() called with a concatenated or f-string command. If any part of the
+      command comes from user input, this allows arbitrary shell command injection.
+      Use subprocess.run([...], shell=False) with a list of arguments instead.
+    metadata:
+      cwe: "CWE-78: Improper Neutralization of Special Elements used in an OS Command"
+      owasp: "A03:2021 - Injection"
+    patterns:
+      - pattern-either:
+          - pattern: os.system($A + $B)
+          - pattern: os.system(f"...{$B}...")
+
+  - id: hardcoded-secret-assignment
+    languages: [python]
+    severity: WARNING
+    message: >
+      A variable with a name suggesting a secret/API key is assigned a hardcoded string
+      literal. Secrets should be loaded from environment variables or a secret manager,
+      never committed to source.
+    metadata:
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+      owasp: "A07:2021 - Identification and Authentication Failures"
+    patterns:
+      - pattern-regex: '(?i)(api_key|apikey|secret|password|token)\s*=\s*["\047][A-Za-z0-9_\-]{8,}["\047]'
