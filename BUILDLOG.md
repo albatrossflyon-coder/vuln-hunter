@@ -22,6 +22,12 @@ invents a finding that Semgrep didn't already flag.
 
 ## Changelog
 
+### 2026-07-09 — Fix the recurring "hang" (real bug: no concurrency, not an infinite loop)
+- **Bug:** Chris reported `scan_diff` running for ~2 hours the previous day with no visible progress — this had come up twice before (mcp-observatory and apify-mcp-server sessions) as an unresolved "lockup," always deferred. Actually investigated this time instead of deferring again.
+- **Root cause:** `triage.py`'s `triage_all` and `business_logic.py`'s `review_files` both processed items in a plain sequential loop — one Claude API call per finding/file, no concurrency, no cap, no progress reporting back through the MCP connection. On a scan with many findings or a `deep_review` pass over many changed files, this is pure serial API latency that can add up to hours with zero visibility. It wasn't stuck — it was making real but invisible one-at-a-time progress. (Claude Code's own cosmetic spinner words like "nesting" that Chris saw cycling are unrelated UI flavor text, not a vuln-hunter status signal.)
+- **Fix:** both functions now use `concurrent.futures.ThreadPoolExecutor` with a bounded worker pool (`MAX_CONCURRENT_TRIAGE` / `MAX_CONCURRENT_REVIEWS`, both 5) instead of a plain `for` loop — same bounded-concurrency pattern applied to job-hunter's `_validate_urls` and its Go port earlier the same night. `pool.map` preserves result order.
+- **Verified** with a mocked-latency test (no real API calls): 10 items at 0.3s simulated latency each completed in ~0.6s (concurrent) vs. the ~3.0s serial time would have taken, with results correctly order-preserved.
+
 ### 2026-07-05 — Backend core: scanner + triage, verified end to end
 
 - **`backend/scanner.py`**: wraps `semgrep scan` as a subprocess (resolves the
@@ -126,9 +132,26 @@ Verified with three real fixtures (`test_sample/business_logic/`), not just trus
 
 **requirements.txt created** (never existed before this — was pip-installing ad hoc). Frontend rebuilt clean after all changes (`npm run build`).
 
+### 2026-07-06 — MCP server layer, wired into Claude Code globally
+
+- **`backend/mcp_server.py`**: exposes `scan_repo`, `scan_diff`, `ignore_finding`,
+  `list_ignored` as MCP tools (same `FastMCP` pattern as `rag-system/mcp_server.py`),
+  importing directly from `scanner.py`/`triage.py`/`business_logic.py`/`ignore_store.py`
+  rather than going through the FastAPI HTTP layer. Mirrors the SonarQube-via-MCP
+  demo (ByteMonk video, 2026-07-06 session) that inspired this.
+- Registered globally in `~/.claude.json` `mcpServers` (available in every Claude
+  Code session, not just this repo), alongside jcodemunch/jdocmunch/etc.
+- **Verified end to end, not just imported**: ran `scan_repo` against the planted
+  4-vulnerability fixture (`test_sample/vulnerable.py`) through real Anthropic API
+  calls — found all 4 (shell injection, SQL injection, eval, hardcoded secret),
+  each with a real triage explanation/fix. Also verified `ignore_finding` +
+  `list_ignored` round-trip correctly, then cleaned up the test artifact
+  (`.vulnhunter-ignore.json`) so it doesn't linger in `test_sample/`.
+- `mcp` added to `requirements.txt` (was already present in the venv as a
+  transitive dependency, now declared explicitly since it's directly used).
+
 ## Pending
 - [ ] Push to GitHub
-- [ ] Consider an MCP server layer (same pattern as rag-system) if useful
 - [ ] Deploy backend + frontend (now safer to do, given the localhost-binding fix — but still needs real auth if ever exposed beyond localhost)
 - [ ] Extend custom rules beyond Python (JS/TS at minimum, given the frontend-dev angle)
 - [ ] Run against other real repos (job-hunter, rag-system, skinstric, etc.) now that the never-read guarantee is in place

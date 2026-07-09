@@ -6,9 +6,17 @@ already came from a rule match against real source code.
 
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List
 
 import anthropic
+
+# Bounded concurrency for triage calls: each is a separate Claude API request,
+# so this stays low enough to avoid a rate-limit thundering herd while still
+# fixing the real bug (triage_all used to run these one at a time -- on a scan
+# with dozens of findings, that meant tens of minutes of serial API latency
+# with zero progress feedback, which just looked like a hang).
+MAX_CONCURRENT_TRIAGE = 5
 
 SYSTEM_PROMPT = """You are a security triage assistant. You will be given a single
 static-analysis finding (rule ID, severity, message, and the exact source code
@@ -68,4 +76,7 @@ def triage_finding(finding: Dict[str, Any], model: str = "claude-sonnet-4-6") ->
 
 
 def triage_all(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    return [triage_finding(f) for f in findings]
+    if not findings:
+        return []
+    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_TRIAGE) as pool:
+        return list(pool.map(triage_finding, findings))

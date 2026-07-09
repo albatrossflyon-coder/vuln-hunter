@@ -13,10 +13,17 @@ class of bug rules can't see: it can be wrong, and must say so honestly.
 
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List
 
 import anthropic
+
+# Bounded concurrency, same reasoning as triage.py's MAX_CONCURRENT_TRIAGE:
+# review_files used to call review_file() one file at a time -- on a diff
+# with many changed files that was pure serial API latency with no progress
+# feedback, easily adding up to hours and looking exactly like a hang.
+MAX_CONCURRENT_REVIEWS = 5
 
 SYSTEM_PROMPT = """You are doing a business-logic / access-control security \
 review of ONE file, as a second pass that complements automated pattern-based \
@@ -105,7 +112,8 @@ def _parse_json_array(text: str) -> List[Dict[str, Any]]:
 
 
 def review_files(file_paths: List[str]) -> List[Dict[str, Any]]:
-    all_findings = []
-    for path in file_paths:
-        all_findings.extend(review_file(path))
-    return all_findings
+    if not file_paths:
+        return []
+    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_REVIEWS) as pool:
+        results = pool.map(review_file, file_paths)
+        return [finding for file_findings in results for finding in file_findings]
