@@ -80,3 +80,9 @@ The API is local-only by default — it can scan arbitrary filesystem paths and 
 ## License
 
 Not yet licensed — all rights reserved by default until a license is chosen.
+
+## Author
+
+Chris Brown  
+[Albatross AI](https://albatrossai.online)  
+[Portfolio](https://chrisbrown-dev.vercel.app)
