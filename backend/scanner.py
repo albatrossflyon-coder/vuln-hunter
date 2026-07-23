@@ -24,10 +24,16 @@ NEVER_READ_PATTERNS = [
     ".npmrc", ".git-credentials", "known_hosts",
 ]
 
+# Vendor/build directories to skip entirely — checked against path *components*,
+# not just the filename, since NEVER_READ_PATTERNS alone never matches a file
+# merely because it lives inside one of these (path.name is the leaf, not the dir).
+EXCLUDE_DIRS = {"node_modules", ".venv", "venv", "dist", "build", "__pycache__", ".git"}
+
 
 def _is_never_read(path: Path) -> bool:
-    name = path.name
-    return any(fnmatch.fnmatch(name, pattern) for pattern in NEVER_READ_PATTERNS)
+    if any(fnmatch.fnmatch(path.name, pattern) for pattern in NEVER_READ_PATTERNS):
+        return True
+    return any(part in EXCLUDE_DIRS for part in path.parts)
 
 
 def _semgrep_executable() -> str:
@@ -55,6 +61,15 @@ def get_changed_files(repo_path: str, base_ref: str = "HEAD") -> List[str]:
     untracked_result = subprocess.run(untracked_cmd, capture_output=True, text=True, timeout=30)
 
     relative_paths = set(diff_result.stdout.splitlines()) | set(untracked_result.stdout.splitlines())
+
+    # A contributor who already committed their fix (normal edit -> commit -> test
+    # flow) has nothing left in `git diff HEAD` -- it only shows uncommitted work.
+    # Without this, that case silently looks identical to "nothing to scan".
+    if base_ref == "HEAD" and not relative_paths:
+        prev_commit_cmd = ["git", "-C", repo_path, "diff", "--name-only", "--diff-filter=ACMR", "HEAD~1"]
+        prev_commit_result = subprocess.run(prev_commit_cmd, capture_output=True, text=True, timeout=30)
+        if prev_commit_result.returncode == 0:
+            relative_paths = set(prev_commit_result.stdout.splitlines())
 
     root = Path(repo_path)
     changed = []
@@ -88,7 +103,10 @@ def run_scan(target_path: str, configs: List[str] | None = None, files: List[str
     cmd += files if files is not None else [target_path]
     cmd += ["--json", "--quiet"]
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("semgrep scan exceeded the 300s timeout — repo is likely too large for a single-pass scan")
     if result.returncode not in (0, 1):  # semgrep exits 1 when findings exist
         raise RuntimeError(f"semgrep failed: {result.stderr[:2000]}")
 
