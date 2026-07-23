@@ -68,6 +68,22 @@ The API is local-only by default — it can scan arbitrary filesystem paths and 
 
 ---
 
+## Install for Claude Code
+
+Once the backend dependencies above are installed, register it as an MCP server so any Claude Code session can call `scan_repo`, `scan_diff`, `ignore_finding`, and `list_ignored` directly, without you having to run the API separately:
+
+```bash
+claude mcp add vuln-hunter -- /path/to/vuln-hunter/backend/venv/Scripts/python.exe /path/to/vuln-hunter/backend/mcp_server.py
+```
+
+(On macOS/Linux, use `venv/bin/python` instead of `venv/Scripts/python.exe`.)
+
+Then just ask Claude Code to scan a repo or a diff — it'll call the tool directly. To have Claude Code set this up for you from scratch (clone, install deps, register the MCP server), just tell it:
+
+> "Clone https://github.com/albatrossflyon-coder/vuln-hunter, install its backend dependencies in a venv, and register it as an MCP server named vuln-hunter."
+
+---
+
 ## Known Limitations
 
 - Only Python has custom rules written/tested so far (community packs cover other languages, but with the same blind spots noted above)
