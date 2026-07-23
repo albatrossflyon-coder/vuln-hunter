@@ -150,6 +150,46 @@ Verified with three real fixtures (`test_sample/business_logic/`), not just trus
 - `mcp` added to `requirements.txt` (was already present in the venv as a
   transitive dependency, now declared explicitly since it's directly used).
 
+### 2026-07-23 — fixed the real "gets stuck" bug, commit bc1fce4
+
+Chris reported vuln-hunter frequently "gets stuck" on real contribution scans.
+Root-caused 3 genuine bugs in `scanner.py`, each reproduced live before and
+after the fix (not just unit-tested):
+
+1. **`get_changed_files` HEAD-diff trap** — defaulted to `git diff HEAD`,
+   which only shows uncommitted work. A committed contribution (the normal
+   edit→commit→test flow) leaves the tree clean, so this silently returned
+   `[]` — looked exactly like the scanner did nothing. Fixed with a fallback
+   to diffing `HEAD~1` when the tree is clean. Reproduced live against rtk's
+   real committed VERSIONINFO fix (commit `6caf3bf`): old logic returns `[]`,
+   new logic correctly finds the 4 real changed files and scans them.
+2. **`_is_never_read` directory-exclusion gap** — only checked `path.name`
+   against `NEVER_READ_PATTERNS`, so files inside `node_modules`/`.venv`/etc.
+   were never excluded by directory, only by exact filename match. Added
+   `EXCLUDE_DIRS` checked against `path.parts`.
+3. **Unhandled 300s semgrep timeout** — `subprocess.run(cmd, ..., timeout=300)`
+   had no `except subprocess.TimeoutExpired`, so a scan that ran long raised
+   an unhandled exception indistinguishable from a hang. Now caught and
+   re-raised as a clear `RuntimeError`.
+
+Speed-verified at real scale (not just the planted fixture): herdr
+(993 files) in 11.0s, a fresh `freeCodeCamp/freeCodeCamp` clone (19,443
+files) in 72.5s, zero stalls — confirms the original "stuck" reports were
+the silent-failure bug above, not a raw performance ceiling.
+
+**Rejected a flawed "corrected scanner.py"** sourced from an earlier Gemini
+second-opinion Google Doc: verified all 5 of its claimed bugs against the
+real code before touching anything. 2 were genuinely real (match fixes #1/#2
+above — independent confirmation they were worth fixing). But it repeated
+the *exact* same semgrep exit-code mistake already debunked the night before
+(real semgrep: exit 1 = findings, exit 2 = fatal error — the doc claimed the
+reverse), and 2 described code/fixes that don't exist anywhere in the actual
+file (fabricated). Only the 2 verified-real issues got fixed, hand-written
+and hand-tested — did not apply the doc's rewrite wholesale.
+
+Committed and pushed to `albatrossflyon-coder/vuln-hunter` master:
+commit `bc1fce4`.
+
 ## Pending
 - [ ] Push to GitHub
 - [ ] Deploy backend + frontend (now safer to do, given the localhost-binding fix — but still needs real auth if ever exposed beyond localhost)
@@ -157,3 +197,5 @@ Verified with three real fixtures (`test_sample/business_logic/`), not just trus
 - [ ] Run against other real repos (job-hunter, rag-system, skinstric, etc.) now that the never-read guarantee is in place
 - [ ] Add authentication before ever binding to anything beyond 127.0.0.1
 - [ ] Wire `deep_review` into the frontend (currently API-only; diff-scan itself has no frontend UI yet either — dashboard only calls whole-repo `/scan`)
+- [ ] Reconcile `backend/mcp_server.py` (untracked) and modified `requirements.txt` sitting in the working tree from a prior session — not yet committed or discarded
+- [ ] Decide whether to merge ponytail-style code cleanup into vuln-hunter for a sellable product — recommended AGAINST a single merged tool (security detection and cleanup are different judgment calls); a two-product/two-mode suite is the likelier path if pursued
