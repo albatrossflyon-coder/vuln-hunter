@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 import business_logic
 import ignore_store
+from gitleaks import run_gitleaks_scan
 from sarif import to_sarif
 from scanner import get_changed_files, run_scan
 from triage import triage_all
@@ -107,6 +108,9 @@ def _finalize(repo_path: str, findings: list[dict]) -> tuple[list[dict], int]:
 async def scan(request: ScanRequest):
     repo_path = _resolve_repo_dir(request.repo_path)
     findings = _rule_based_findings(repo_path)
+    # Git-history secret scan, not just the present tree -- deterministic,
+    # skips triage.py entirely (see gitleaks.py for why).
+    findings += run_gitleaks_scan(repo_path)
     kept, ignored_count = _finalize(repo_path, findings)
     return ScanResponse(findings=kept, total=len(kept), ignored_count=ignored_count)
 
@@ -121,6 +125,13 @@ async def scan_diff(request: DiffScanRequest):
     per changed file, looking for access-control/business-logic issues rule-matching
     can't express. Kept diff-scan-only since it's per-file-expensive; running it
     against a whole repo on every scan wouldn't scale the same way rule scanning does.
+
+    # ponytail: does NOT run the gitleaks history scan (see /scan and
+    # /scan/sarif) -- "diff-only" doesn't map cleanly onto history scanning,
+    # since an old secret from 5 commits back has nothing to do with what
+    # changed in *this* diff. Doing it properly means scoping gitleaks to the
+    # commit range via --log-opts, a separate feature. Add when diff/CI scans
+    # specifically need to catch secrets introduced by the diff itself.
     """
     repo_path = _resolve_repo_dir(request.repo_path)
     try:
@@ -141,6 +152,7 @@ async def scan_sarif(request: ScanRequest):
     """Same scan, returned as SARIF 2.1.0 for GitHub Security tab / CI tooling."""
     repo_path = _resolve_repo_dir(request.repo_path)
     findings = _rule_based_findings(repo_path)
+    findings += run_gitleaks_scan(repo_path)
     kept, _ = _finalize(repo_path, findings)
     return JSONResponse(content=to_sarif(kept))
 
