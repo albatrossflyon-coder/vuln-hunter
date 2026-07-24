@@ -5,6 +5,7 @@ python-dotenv>=1.0.0
 anthropic>=0.40.0
 semgrep>=1.90.0
 mcp>=1.0.0
+pip-audit>=2.7.0
 
 # dev/test only
 jsonschema>=4.25.0

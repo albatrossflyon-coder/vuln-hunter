@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 import business_logic
 import ignore_store
+from dep_scan import run_pip_audit_scan
 from gitleaks import run_gitleaks_scan
 from sarif import to_sarif
 from scanner import get_changed_files, run_scan
@@ -108,9 +109,10 @@ def _finalize(repo_path: str, findings: list[dict]) -> tuple[list[dict], int]:
 async def scan(request: ScanRequest):
     repo_path = _resolve_repo_dir(request.repo_path)
     findings = _rule_based_findings(repo_path)
-    # Git-history secret scan, not just the present tree -- deterministic,
-    # skips triage.py entirely (see gitleaks.py for why).
+    # Git-history secret scan and dependency CVE scan, both deterministic --
+    # skip triage.py entirely (see gitleaks.py / dep_scan.py for why).
     findings += run_gitleaks_scan(repo_path)
+    findings += run_pip_audit_scan(repo_path)
     kept, ignored_count = _finalize(repo_path, findings)
     return ScanResponse(findings=kept, total=len(kept), ignored_count=ignored_count)
 
@@ -142,6 +144,11 @@ async def scan_diff(request: DiffScanRequest):
     findings = _rule_based_findings(repo_path, files=changed_files)
     if request.deep_review:
         findings += business_logic.review_files(changed_files)
+    # Unlike gitleaks (whole-history scan, doesn't fit diff-only), a
+    # dependency CVE check genuinely is diff-scoped: only worth re-running
+    # when requirements.txt itself is one of the changed files.
+    if any(Path(f).name == "requirements.txt" for f in changed_files):
+        findings += run_pip_audit_scan(repo_path)
 
     kept, ignored_count = _finalize(repo_path, findings)
     return ScanResponse(findings=kept, total=len(kept), ignored_count=ignored_count)
@@ -153,6 +160,7 @@ async def scan_sarif(request: ScanRequest):
     repo_path = _resolve_repo_dir(request.repo_path)
     findings = _rule_based_findings(repo_path)
     findings += run_gitleaks_scan(repo_path)
+    findings += run_pip_audit_scan(repo_path)
     kept, _ = _finalize(repo_path, findings)
     return JSONResponse(content=to_sarif(kept))
 
