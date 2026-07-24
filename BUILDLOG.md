@@ -190,6 +190,45 @@ and hand-tested — did not apply the doc's rewrite wholesale.
 Committed and pushed to `albatrossflyon-coder/vuln-hunter` master:
 commit `bc1fce4`.
 
+### 2026-07-24 — path-traversal fix on every repo_path endpoint, commit 27f3e83
+
+A second Gemini review round (planning the next batch of additions — YARA,
+Gitleaks, pip-audit/Trivy, Presidio) flagged that `main.py` never validated
+`repo_path` before using it: every endpoint (`scan`, `scan/diff`,
+`scan/sarif`, `ignore`, `unignore`, `list_ignored`) passed the raw request
+string straight through to file I/O and subprocess calls.
+
+Verified the gap was real by reading the code directly before fixing
+anything — `_rule_based_findings` only did `Path(repo_path).exists()`, no
+`.resolve()`, no directory check, no bounds check at all.
+
+**Deviated from the suggested fix on purpose**: the suggestion was a single
+allowed-root + `is_relative_to()` check, but vuln-hunter scans arbitrary
+local repos by design (job-hunter, rag-system, this repo, etc. all live in
+different places) — there's no single jail directory that fits without
+breaking normal usage. Added `_resolve_repo_dir()` instead: canonicalize
+with `.resolve()`, require `.is_dir()`, reject otherwise. Closes the real
+gap (unvalidated raw strings) without inventing a root restriction that
+doesn't match the tool's actual usage.
+
+Checked `ignore_store._store_path` first to confirm resolving the path
+wouldn't orphan existing `.vulnhunter-ignore.json` files — it writes
+directly into the target directory, not keyed by the literal string, so
+resolving is safe.
+
+Added `test_resolve_repo_dir.py` — plain assert-based script (no pytest in
+this project yet, didn't want to add it as a dependency for one function).
+Covers: valid dir, traversal-segment normalization, nonexistent-path
+rejection, file-vs-directory rejection. All pass. Confirmed the app still
+loads all 11 routes cleanly post-refactor.
+
+Also verified (before touching anything) that the "unbounded concurrent
+LLM calls" item from the same review round is **already handled**:
+`triage.py` (`MAX_CONCURRENT_TRIAGE = 5`) and `business_logic.py`
+(`MAX_CONCURRENT_REVIEWS = 5`) both already bound their `ThreadPoolExecutor`
+pools. A global cross-module cap is a reasonable future refinement, not an
+open gap — left undone for now.
+
 ## Pending
 - [ ] Push to GitHub
 - [ ] Deploy backend + frontend (now safer to do, given the localhost-binding fix — but still needs real auth if ever exposed beyond localhost)
