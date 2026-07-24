@@ -229,6 +229,49 @@ LLM calls" item from the same review round is **already handled**:
 pools. A global cross-module cap is a reasonable future refinement, not an
 open gap — left undone for now.
 
+### 2026-07-24 — Gitleaks git-history secret scanning, commit 80418aa
+
+First of the "New Capabilities" batch from the review round (YARA, Gitleaks,
+pip-audit/Trivy, Presidio). Closes a real gap: `NEVER_READ_PATTERNS` in
+`scanner.py` only guards the present working tree — a secret committed once
+and later removed from the tree is still readable in git's object history
+until purged. Not hypothetical: Universal-Brain's own history has a
+live-looking Figma token that reached `origin/main` before anyone caught it.
+
+`gitleaks.py` mirrors `scanner.py`'s shape (`run_gitleaks_scan(repo_path) ->
+List[Dict]`), same Finding schema. Deterministic findings only — skips
+`triage.py` entirely (no LLM call needed to explain "this is a hardcoded
+secret"), same reasoning `business_logic.py` already uses for its own
+findings. Tagged `finding_type="secret_leak"`.
+
+Verified against the real binary (gitleaks v8.30.1, already installed on
+this machine), not mocked:
+- `--redact` confirmed to mask the secret inside gitleaks itself, before the
+  JSON ever reaches this process — simpler and safer than app-level
+  redaction after the fact.
+- `--exit-code 0` override confirmed: findings are read from the report
+  file, not the exit code, avoiding the same "does non-zero mean findings or
+  a real error" ambiguity semgrep's exit codes caused a few days ago.
+- Full integration-tested through `_finalize`/`ignore_store`: a gitleaks
+  finding flows correctly through the fingerprint-based suppression system —
+  marking it safe correctly filters it out on the next scan.
+
+Wired into `/scan` and `/scan/sarif`. Deliberately **not** wired into
+`/scan/diff` — "diff-only" doesn't map cleanly onto history scanning, since
+an old secret from 5 commits back has nothing to do with what changed in the
+current diff. Doing it properly needs gitleaks scoped to a commit range via
+`--log-opts`; marked with a `ponytail:` comment as a follow-up, not silently
+skipped.
+
+**Real near-miss caught mid-build**: the first version of `test_gitleaks.py`
+used a hardcoded fixture reusing a known-leaked token string from another
+repo's history (the same Figma token above) — GitHub's push protection
+correctly blocked the push before it ever reached the remote. Fixed by
+generating the test fixture with `secrets.token_hex()` at runtime instead of
+any fixed literal, confirmed it still triggers gitleaks' detection, then
+amended the (never-pushed) commit before it went out. Self-scanned this
+repo with gitleaks itself post-fix to confirm clean before pushing.
+
 ## Pending
 - [ ] Push to GitHub
 - [ ] Deploy backend + frontend (now safer to do, given the localhost-binding fix — but still needs real auth if ever exposed beyond localhost)
