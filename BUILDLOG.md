@@ -272,6 +272,43 @@ any fixed literal, confirmed it still triggers gitleaks' detection, then
 amended the (never-pushed) commit before it went out. Self-scanned this
 repo with gitleaks itself post-fix to confirm clean before pushing.
 
+### 2026-07-24 — pip-audit dependency CVE scanning, commit 83439e7
+
+Second of the "New Capabilities" batch. Scans `requirements.txt` against
+PyPA's own `pip-audit` tool (PyPI Advisory DB + OSV) — a library-level CVE
+exists even if your own code is flawless, and Semgrep never looks at
+third-party dependencies at all. `dep_scan.py` mirrors `gitleaks.py`'s
+shape, deterministic findings, skips `triage.py`.
+
+**Named `dep_scan.py`, not `pip_audit.py`**: the obvious name collides with
+the actual installed `pip_audit` PyPA package in this venv (needed to run
+it as a subprocess). It happened to resolve correctly via local-directory
+import precedence when tested in isolation, but that's fragile across
+different invocation contexts — caught and renamed before wiring it into
+`main.py`, not after something broke.
+
+Verified against the real binary + live PyPI/OSV data (`urllib3==1.26.4`,
+real long-patched CVEs), not mocked. Confirmed `pip-audit` has no
+`--exit-code` override like `gitleaks` does — exit 1 means both "vulns
+found" and "a real failure," so disambiguated by whether stdout parses as
+valid JSON instead.
+
+**Real bug the integration test caught, not assumed away**: `pip-audit`
+genuinely double-reports some advisories — `PYSEC-2021-108` came back twice
+for the exact same fixture, once with a short description and once with
+the full GHSA text (almost certainly OSV + PyPI sources both flagging the
+same ID). First integration-test run caught this directly: ignoring one
+finding suppressed *two* on rescan, not one. Fixed with per-vuln-id dedup
+(keep whichever copy has the longer description); test now asserts no
+duplicate `rule_id`s so it can't silently regress.
+
+Wired into `/scan` and `/scan/sarif`. Also wired into `/scan/diff` — unlike
+gitleaks, this genuinely is diff-scoped (only worth re-running when
+`requirements.txt` itself changed), gated on that file being among the
+changed files.
+
+Added `pip-audit>=2.7.0` to `requirements.txt`.
+
 ## Pending
 - [ ] Push to GitHub
 - [ ] Deploy backend + frontend (now safer to do, given the localhost-binding fix — but still needs real auth if ever exposed beyond localhost)
