@@ -71,12 +71,26 @@ class IgnoreRequest(BaseModel):
     reason: str = ""
 
 
+def _resolve_repo_dir(repo_path: str) -> str:
+    """Resolve repo_path to a canonical absolute path and verify it's a real
+    directory before it's ever used for file I/O or handed to a subprocess.
+
+    Deliberately does not restrict to a single allowed root: scanning
+    arbitrary local repos by path is this tool's whole point (job-hunter,
+    rag-system, this repo, etc. all live in different places), so there's
+    no single jail directory that would fit. Resolving up front still closes
+    the real gap: every caller downstream previously received the raw,
+    unvalidated request string as-is.
+    """
+    target = Path(repo_path).resolve()
+    if not target.is_dir():
+        raise HTTPException(status_code=400, detail=f"Not a directory: {repo_path}")
+    return str(target)
+
+
 def _rule_based_findings(repo_path: str, files: list[str] | None = None) -> list[dict]:
-    target = Path(repo_path)
-    if not target.exists():
-        raise HTTPException(status_code=400, detail=f"Path does not exist: {repo_path}")
     try:
-        findings = run_scan(str(target), files=files)
+        findings = run_scan(repo_path, files=files)
         return triage_all(findings)
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -91,8 +105,9 @@ def _finalize(repo_path: str, findings: list[dict]) -> tuple[list[dict], int]:
 
 @app.post("/scan", response_model=ScanResponse)
 async def scan(request: ScanRequest):
-    findings = _rule_based_findings(request.repo_path)
-    kept, ignored_count = _finalize(request.repo_path, findings)
+    repo_path = _resolve_repo_dir(request.repo_path)
+    findings = _rule_based_findings(repo_path)
+    kept, ignored_count = _finalize(repo_path, findings)
     return ScanResponse(findings=kept, total=len(kept), ignored_count=ignored_count)
 
 
@@ -107,36 +122,40 @@ async def scan_diff(request: DiffScanRequest):
     can't express. Kept diff-scan-only since it's per-file-expensive; running it
     against a whole repo on every scan wouldn't scale the same way rule scanning does.
     """
+    repo_path = _resolve_repo_dir(request.repo_path)
     try:
-        changed_files = get_changed_files(request.repo_path, request.base_ref)
+        changed_files = get_changed_files(repo_path, request.base_ref)
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    findings = _rule_based_findings(request.repo_path, files=changed_files)
+    findings = _rule_based_findings(repo_path, files=changed_files)
     if request.deep_review:
         findings += business_logic.review_files(changed_files)
 
-    kept, ignored_count = _finalize(request.repo_path, findings)
+    kept, ignored_count = _finalize(repo_path, findings)
     return ScanResponse(findings=kept, total=len(kept), ignored_count=ignored_count)
 
 
 @app.post("/scan/sarif")
 async def scan_sarif(request: ScanRequest):
     """Same scan, returned as SARIF 2.1.0 for GitHub Security tab / CI tooling."""
-    findings = _rule_based_findings(request.repo_path)
-    kept, _ = _finalize(request.repo_path, findings)
+    repo_path = _resolve_repo_dir(request.repo_path)
+    findings = _rule_based_findings(repo_path)
+    kept, _ = _finalize(repo_path, findings)
     return JSONResponse(content=to_sarif(kept))
 
 
 @app.post("/ignore")
 async def ignore_finding(request: IgnoreRequest):
     """Mark a finding as safe so it doesn't resurface on future scans of this repo."""
-    ignore_store.add_ignore(request.repo_path, request.fingerprint, request.rule_id, request.path, request.reason)
+    repo_path = _resolve_repo_dir(request.repo_path)
+    ignore_store.add_ignore(repo_path, request.fingerprint, request.rule_id, request.path, request.reason)
     return {"status": "ignored", "fingerprint": request.fingerprint}
 
 
 @app.delete("/ignore/{fingerprint_id}")
 async def unignore_finding(fingerprint_id: str, repo_path: str):
+    repo_path = _resolve_repo_dir(repo_path)
     removed = ignore_store.remove_ignore(repo_path, fingerprint_id)
     if not removed:
         raise HTTPException(status_code=404, detail="No such ignored finding")
@@ -145,6 +164,7 @@ async def unignore_finding(fingerprint_id: str, repo_path: str):
 
 @app.get("/ignored")
 async def list_ignored(repo_path: str):
+    repo_path = _resolve_repo_dir(repo_path)
     return ignore_store.load_ignored(repo_path)
 
 
