@@ -1,6 +1,7 @@
 <p align="center">
-  <img src="https://capsule-render.vercel.app/api?type=waving&color=0:7F1D1D,100:DC2626&height=250&section=header&text=vuln-hunter&fontSize=75&fontColor=ffffff&animation=fadeIn&fontAlignY=35&desc=Real%20static%20analysis%20for%20detection%2C%20Claude%20for%20triage%20%E2%80%94%20never%20the%20reverse&descAlignY=58&descSize=18&descColor=ffffff" alt="vuln-hunter" width="100%"/>
+  <img src="assets/banner.png" alt="vuln-hunter" width="100%"/>
 </p>
+<p align="center"><sub>Golden Eagle photo: <a href="https://commons.wikimedia.org/wiki/File:Golden_Eagle_in_flight_-_5.jpg">Tony Hisgett</a>, CC BY 2.0</sub></p>
 
 AI-assisted security code reviewer, built on a hybrid architecture: **Semgrep does detection, Claude does triage.** Claude never invents a finding Semgrep didn't already flag.
 
