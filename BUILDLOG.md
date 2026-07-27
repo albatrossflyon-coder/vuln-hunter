@@ -22,6 +22,13 @@ invents a finding that Semgrep didn't already flag.
 
 ## Changelog
 
+### 2026-07-27 — Real root cause of the still-unresolved hang: unbounded Anthropic client timeout
+
+- **Bug:** the 2026-07-26 fix (below) bumped semgrep's own subprocess timeout, but `scan_repo` still hung live afterward against a trivial repo, even with a fresh MCP process (duplicate-child-process theory investigated and disproven same night). Root-caused this session: `triage.py`'s `triage_finding()` and `business_logic.py`'s `review_file()` both instantiate `anthropic.Anthropic(api_key=...)` with no explicit `timeout=`, so each inherits the SDK default — a 600s read timeout with 2 retries (confirmed directly: `Timeout(connect=5.0, read=600, write=600, pool=600)`, `max_retries=2` on SDK 0.116.0). Since `triage_all`/`review_files` both call `ThreadPoolExecutor.map()`, the whole `scan_repo`/`scan_diff` response blocks until *every* concurrent call finishes — one slow or stuck API call (network blip, transient overload) can silently stall the entire tool response for up to ~30 minutes. Indistinguishable from a hang from the caller's side.
+- **Fix:** bounded both client instantiations to `timeout=60.0`. Worst case for one stuck call is now ~3 minutes (60s × up to 3 attempts with retries), not up to 30.
+- **Verified:** instantiated both clients directly and confirmed `.timeout == 60.0` (down from the implicit 600s default) on both. Full live repro wasn't possible — the specific test repo (smart-job-cli) is no longer cloned locally — but the mechanism (SDK default timeout, blocking `pool.map`) was confirmed directly against the actual SDK, not inferred.
+- Not yet committed/pushed as of this entry — see next commit.
+
 ### 2026-07-26 — Fix the hardcoded 300s scan_repo timeout on larger repos
 
 - **Bug:** `scan_repo` (`backend/scanner.py:107`) hardcoded `subprocess.run(cmd, ..., timeout=300)` around the semgrep call, with no way to override it. Hit live tonight against `claw-code` (194k-star repo, large enough that a single-pass semgrep scan didn't finish in 300s) — the known workaround (call `semgrep.exe` directly via `run_in_background`) was already documented as a stopgap, this fixes the actual tool. Separately, semgrep's own internal per-rule timeout (`--timeout`, defaults to 5s, never set by `scanner.py`) was causing "fixpoint timeout" false-inconclusives on several files during taint analysis on the same repo.

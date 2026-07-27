@@ -63,7 +63,9 @@ def review_file(file_path: str, model: str = "claude-sonnet-4-6") -> List[Dict[s
     content = path.read_text(encoding="utf-8", errors="replace")
     numbered = "\n".join(f"{i + 1}: {line}" for i, line in enumerate(content.splitlines()))
 
-    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    # ponytail: see triage.py's triage_finding for why this needs a bound --
+    # same blocking-pool-of-concurrent-calls shape, same fix.
+    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), timeout=60.0)
     response = client.messages.create(
         model=model,
         max_tokens=1200,

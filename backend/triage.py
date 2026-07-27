@@ -51,7 +51,12 @@ def _parse_json_response(text: str) -> Dict[str, Any]:
 
 
 def triage_finding(finding: Dict[str, Any], model: str = "claude-sonnet-4-6") -> Dict[str, Any]:
-    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    # ponytail: SDK default is a 600s read timeout with 2 retries -- since
+    # triage_all blocks on every concurrent call finishing, one stuck request
+    # can stall the whole scan_repo/scan_diff response for up to ~30 minutes,
+    # indistinguishable from a hang. Bound it so a stuck call fails fast and
+    # visibly instead.
+    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), timeout=60.0)
 
     user_message = (
         f"Rule: {finding['rule_id']}\n"
