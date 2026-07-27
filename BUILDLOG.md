@@ -22,6 +22,13 @@ invents a finding that Semgrep didn't already flag.
 
 ## Changelog
 
+### 2026-07-26 — Fix the hardcoded 300s scan_repo timeout on larger repos
+
+- **Bug:** `scan_repo` (`backend/scanner.py:107`) hardcoded `subprocess.run(cmd, ..., timeout=300)` around the semgrep call, with no way to override it. Hit live tonight against `claw-code` (194k-star repo, large enough that a single-pass semgrep scan didn't finish in 300s) — the known workaround (call `semgrep.exe` directly via `run_in_background`) was already documented as a stopgap, this fixes the actual tool. Separately, semgrep's own internal per-rule timeout (`--timeout`, defaults to 5s, never set by `scanner.py`) was causing "fixpoint timeout" false-inconclusives on several files during taint analysis on the same repo.
+- **Fix:** bumped the outer subprocess timeout to 1800s (30 min), and added an explicit `--timeout 30` flag to the semgrep invocation itself for the per-rule limit. Checked the full call chain (`main.py`, `mcp_server.py`) for any other wrapping timeout that would still cut the scan off early — there isn't one; `scanner.py`'s subprocess call was the single choke point.
+- **Verified:** re-ran `scan_repo` against `claw-code` after the fix; previously failed at exactly 300s, now completed with the 8 previously-inconclusive files confirmed clean. Also confirmed via direct `semgrep.exe` runs against two smaller unrelated repos (smart-job-cli, the_silver_searcher) on 2026-07-26 — both completed in seconds with the same config.
+- Committed and pushed 2026-07-26 — the live MCP server process needs a restart to actually pick this up (a same-named duplicate-process issue is being investigated separately, see below if resolved).
+
 ### 2026-07-09 — Fix the recurring "hang" (real bug: no concurrency, not an infinite loop)
 - **Bug:** Chris reported `scan_diff` running for ~2 hours the previous day with no visible progress — this had come up twice before (mcp-observatory and apify-mcp-server sessions) as an unresolved "lockup," always deferred. Actually investigated this time instead of deferring again.
 - **Root cause:** `triage.py`'s `triage_all` and `business_logic.py`'s `review_files` both processed items in a plain sequential loop — one Claude API call per finding/file, no concurrency, no cap, no progress reporting back through the MCP connection. On a scan with many findings or a `deep_review` pass over many changed files, this is pure serial API latency that can add up to hours with zero visibility. It wasn't stuck — it was making real but invisible one-at-a-time progress. (Claude Code's own cosmetic spinner words like "nesting" that Chris saw cycling are unrelated UI flavor text, not a vuln-hunter status signal.)

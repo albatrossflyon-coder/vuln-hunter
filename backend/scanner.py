@@ -101,12 +101,12 @@ def run_scan(target_path: str, configs: List[str] | None = None, files: List[str
     for pattern in NEVER_READ_PATTERNS:
         cmd += ["--exclude", pattern]
     cmd += files if files is not None else [target_path]
-    cmd += ["--json", "--quiet"]
+    cmd += ["--json", "--quiet", "--timeout", "30"]
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
     except subprocess.TimeoutExpired:
-        raise RuntimeError("semgrep scan exceeded the 300s timeout — repo is likely too large for a single-pass scan")
+        raise RuntimeError("semgrep scan exceeded the 1800s timeout — repo is likely too large for a single-pass scan")
     if result.returncode not in (0, 1):  # semgrep exits 1 when findings exist
         raise RuntimeError(f"semgrep failed: {result.stderr[:2000]}")
 
