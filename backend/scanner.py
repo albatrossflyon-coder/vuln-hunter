@@ -100,6 +100,12 @@ def run_scan(target_path: str, configs: List[str] | None = None, files: List[str
         cmd += ["--config", config]
     for pattern in NEVER_READ_PATTERNS:
         cmd += ["--exclude", pattern]
+    for dirname in EXCLUDE_DIRS:
+        # EXCLUDE_DIRS was only ever used to filter results after the fact --
+        # semgrep still crawled these directories on every full-repo scan.
+        # Real cause of a "near-zero CPU, no progress" hang on repos with
+        # large vendor/generated dirs (found live on kungfu-systems/kungfu).
+        cmd += ["--exclude", dirname]
     cmd += files if files is not None else [target_path]
     cmd += ["--json", "--quiet", "--timeout", "30"]
 
