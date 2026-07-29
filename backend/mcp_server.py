@@ -9,14 +9,16 @@ Wire into Claude Code's MCP config (e.g. ~/.claude.json) with:
 }
 """
 
+import functools
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+import anyio
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent / ".env")
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 import business_logic
 import ignore_store
@@ -52,34 +54,56 @@ def _format_findings(findings: List[Dict[str, Any]], ignored_count: int) -> str:
 
 
 @mcp.tool()
-def scan_repo(repo_path: str) -> str:
+async def scan_repo(repo_path: str, ctx: Context) -> str:
     """Run a full security scan of a repo (Semgrep detection + Claude triage for
     explanation/exploitability/fix). Use for a first pass on a whole repo. For
     just-changed files, use scan_diff instead -- it's much faster."""
     target = Path(repo_path)
     if not target.exists():
         return f"Error: path does not exist: {repo_path}"
-    findings = triage_all(run_scan(str(target)))
+
+    # ponytail: FastMCP calls sync tool functions directly on the server's single
+    # asyncio event loop (see mcp/server/fastmcp/utilities/func_metadata.py) --
+    # it does NOT thread-offload them. A sync tool that blocks for minutes freezes
+    # the whole server, so it can't relay any response/progress, and Claude Code's
+    # own idle-timeout kills the call ("sent no response or progress for 1800s")
+    # regardless of vuln-hunter's own internal timeouts. anyio.to_thread.run_sync
+    # keeps the event loop free so the server stays alive and report_progress can
+    # actually get out.
+    await ctx.report_progress(0, 1, "running semgrep...")
+    raw_findings = await anyio.to_thread.run_sync(functools.partial(run_scan, str(target)))
+
+    await ctx.report_progress(0.5, 1, f"triaging {len(raw_findings)} finding(s) with Claude...")
+    findings = await anyio.to_thread.run_sync(functools.partial(triage_all, raw_findings))
+
+    await ctx.report_progress(1, 1, "done")
     kept, ignored_count = _finalize(repo_path, findings)
     return _format_findings(kept, ignored_count)
 
 
 @mcp.tool()
-def scan_diff(repo_path: str, base_ref: str = "HEAD", deep_review: bool = False) -> str:
+async def scan_diff(repo_path: str, ctx: Context, base_ref: str = "HEAD", deep_review: bool = False) -> str:
     """Scan only files changed vs base_ref (default HEAD = uncommitted changes) --
     much cheaper than scan_repo for iterative work. Set deep_review=True to also
     run a second AI pass for business-logic/access-control issues (missing
     ownership checks, etc.) that rule-matching can't express -- costs one extra
     Claude call per changed file."""
     try:
-        changed_files = get_changed_files(repo_path, base_ref)
+        changed_files = await anyio.to_thread.run_sync(functools.partial(get_changed_files, repo_path, base_ref))
     except RuntimeError as e:
         return f"Error: {e}"
 
-    findings = triage_all(run_scan(repo_path, files=changed_files))
-    if deep_review:
-        findings += business_logic.review_files(changed_files)
+    await ctx.report_progress(0, 1, "running semgrep...")
+    raw_findings = await anyio.to_thread.run_sync(functools.partial(run_scan, repo_path, files=changed_files))
 
+    await ctx.report_progress(0.5, 1, f"triaging {len(raw_findings)} finding(s) with Claude...")
+    findings = await anyio.to_thread.run_sync(functools.partial(triage_all, raw_findings))
+
+    if deep_review:
+        await ctx.report_progress(0.8, 1, "running business-logic review...")
+        findings += await anyio.to_thread.run_sync(functools.partial(business_logic.review_files, changed_files))
+
+    await ctx.report_progress(1, 1, "done")
     kept, ignored_count = _finalize(repo_path, findings)
     return _format_findings(kept, ignored_count)
 

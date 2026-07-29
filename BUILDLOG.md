@@ -22,6 +22,30 @@ invents a finding that Semgrep didn't already flag.
 
 ## Changelog
 
+### 2026-07-29 — Real root cause of the recurring MCP hang: FastMCP blocks the event loop on sync tools
+
+Third documented occurrence of `scan_repo` hanging with zero response/progress until Claude Code's own idle-timeout killed it ("sent no response or progress for 1800s") — this time on `last30days-skill`, a 421-file repo, not unusually large. Prior fixes (semgrep timeout bump, EXCLUDE_DIRS reaching semgrep) were both real but didn't address this.
+
+**Root cause, confirmed by reading the installed `mcp` SDK's own source** (`mcp/server/fastmcp/utilities/func_metadata.py:92-95`): FastMCP calls synchronous tool functions *directly inline* on the server's single asyncio event loop — it does not thread-offload them. `scan_repo`/`scan_diff` were plain `def`, not `async def`. While `run_scan()`'s `subprocess.run()` and `triage_all()`'s `ThreadPoolExecutor.map()` were running, the entire event loop was frozen — the server could not send or receive *any* protocol traffic, including a heartbeat, for the whole duration. That's a structural guarantee of a client-side idle-timeout eventually firing, independent of how long the real work takes or what vuln-hunter's own internal timeouts are set to.
+
+**Fix:** converted both tools to `async def` with a `Context` parameter; the actual blocking calls (`run_scan`, `triage_all`, `get_changed_files`, `business_logic.review_files`) now run via `anyio.to_thread.run_sync(...)`, keeping the event loop free. Added `ctx.report_progress()` calls at each stage boundary (semgrep start, triage start, done) — a no-op if the client didn't request progress tracking, but the correct mechanism if it did.
+
+**Verified:** added `test_event_loop_not_blocked_manual.py` — mocks the blocking calls with real `time.sleep()`, runs a concurrent asyncio heartbeat task, asserts the event loop kept ticking throughout (17 ticks during a 1s simulated scan; a blocked loop would show 0-1). All existing manual tests (`test_exclude_dirs_manual.py`, `test_never_read_manual.py`, `test_diff_scan_manual.py`, `test_resolve_repo_dir.py`) still pass. Semgrep security scan of the diff itself: 0 findings.
+
+**Not yet verified:** same gap as every prior fix in this thread — the live MCP server process needs a restart to pick up the new code. Standalone-Python-level proof is solid; the actual `scan_repo`/`scan_diff` tool calls through Claude Code haven't been re-run against a real repo since this landed. Do that before calling this thread closed.
+
+### 2026-07-28 — Real (likely primary) cause of the semgrep-phase hang: EXCLUDE_DIRS never reached semgrep
+
+`EXCLUDE_DIRS` (node_modules, .venv, venv, dist, build, __pycache__, .git) was defined and used by `_is_never_read()` to filter findings *after* a scan completed, but `run_scan()`'s actual semgrep command only ever passed `--exclude` for `NEVER_READ_PATTERNS` (credential-pattern files) — never for these directories. So every scan fully crawled node_modules/.venv/etc. on every run. This is the likely real (or at least major contributing) cause of the "near-zero CPU, no progress" hang found live on kungfu-systems/kungfu (2026-07-27), worked around that session by manually excluding its generated-artifact dirs (`.buildchain`, `.kungfu`, `.xinfa`) via direct semgrep flags — never root-caused until now.
+
+**Fix:** loop `EXCLUDE_DIRS` into `--exclude` flags alongside `NEVER_READ_PATTERNS` in `run_scan()`. One line added to an existing loop pattern.
+
+**Verified live, not just constructed:** built a real temp dir with the same vulnerable file both at top level and duplicated inside `node_modules/vendor/` — before the fix semgrep found both, after the fix only the top-level file is found (confirmed via semgrep's own JSON output, not just post-filtered). Added `test_exclude_dirs_manual.py` as a permanent regression check; confirmed `test_diff_scan_manual.py` still passes. Committed (`197254e`), pushed.
+
+Doesn't rule out kungfu's custom dirs (`.buildchain`/`.kungfu`/`.xinfa`) needing their own project-specific exclusion too — `EXCLUDE_DIRS` is a fixed generic list, not dynamic — but the standard vendor-dir case (the overwhelmingly common one) is now genuinely fixed.
+
+**Caveat found same day:** ran the live `scan_diff` MCP tool against this exact commit (scanning vuln-hunter's own repo, which has a large `backend/venv`) as this session's security-quality-gate check — it hung and timed out after 30 minutes, the same symptom this fix targets. Root cause: the tool's MCP server subprocess was already warm/running *before* the scanner.py edit landed this session, and Python doesn't hot-reload an already-imported module — same "needs a restart to pick up the fix" gap documented on 2026-07-18/2026-07-25 for earlier scanner.py changes. Not evidence the fix is wrong (the standalone Python-level test above proves the logic works); it's evidence the live MCP tool specifically hasn't picked it up yet. **Still needs a real restart-and-rerun to confirm the live tool path is fixed, not just the underlying function.**
+
 ### 2026-07-27 — Real root cause of the still-unresolved hang: unbounded Anthropic client timeout
 
 - **Bug:** the 2026-07-26 fix (below) bumped semgrep's own subprocess timeout, but `scan_repo` still hung live afterward against a trivial repo, even with a fresh MCP process (duplicate-child-process theory investigated and disproven same night). Root-caused this session: `triage.py`'s `triage_finding()` and `business_logic.py`'s `review_file()` both instantiate `anthropic.Anthropic(api_key=...)` with no explicit `timeout=`, so each inherits the SDK default — a 600s read timeout with 2 retries (confirmed directly: `Timeout(connect=5.0, read=600, write=600, pool=600)`, `max_retries=2` on SDK 0.116.0). Since `triage_all`/`review_files` both call `ThreadPoolExecutor.map()`, the whole `scan_repo`/`scan_diff` response blocks until *every* concurrent call finishes — one slow or stuck API call (network blip, transient overload) can silently stall the entire tool response for up to ~30 minutes. Indistinguishable from a hang from the caller's side.
