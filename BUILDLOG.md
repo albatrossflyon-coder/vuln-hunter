@@ -22,6 +22,14 @@ invents a finding that Semgrep didn't already flag.
 
 ## Changelog
 
+### 2026-07-30 — MCP `scan_repo` hang: live-verified fixed, real process-freshness proof this time
+
+Ran `scan_repo` against `affaan-m/ECC` (the same repo that hung the full 1800s two sessions ago) with a **confirmed-fresh MCP server process** — checked `Get-CimInstance Win32_Process` creation timestamps for both `mcp_server.py` PIDs (11:29:56 AM 2026-07-30) against the last fix commit `438feab` (6:45:57 PM 2026-07-29): process postdates the fix, so this is a real test, not the "assumed fixed, never confirmed" trap from the prior two sessions.
+
+**Result: completed successfully, no hang.** Returned 25 findings — the exact same count and rule set already triaged as false positives via the direct-semgrep workaround on 2026-07-29 (safe `spawnSync`-with-array-args patterns, two `dynamic-urllib-use` findings on internal/allowlisted URLs). Tool moved the call to background after 120s (real scan time on a repo this size, not a freeze — no progress stall, no idle-timeout kill).
+
+This closes the 4th-fix-attempt thread from 2026-07-29 late night. Root cause (FastMCP blocking the event loop on sync tool calls) was correctly diagnosed; the async/anyio conversion (`438feab`) was the actual fix, live-confirmed above. The `scanner.py` manual Popen/thread pipe-draining diagnostic from the same night was built on a disproven theory (a pipe-buffer deadlock inside `subprocess.run`, which `Popen.communicate()` already prevents) and was reverted 2026-07-30 rather than committed — only `stdin=subprocess.DEVNULL` was kept, since it fixes a real, independent concern. Marked resolved in memory (`vuln-hunter-mcp-scan-repo-still-hangs`).
+
 ### 2026-07-29 — Real root cause of the recurring MCP hang: FastMCP blocks the event loop on sync tools
 
 Third documented occurrence of `scan_repo` hanging with zero response/progress until Claude Code's own idle-timeout killed it ("sent no response or progress for 1800s") — this time on `last30days-skill`, a 421-file repo, not unusually large. Prior fixes (semgrep timeout bump, EXCLUDE_DIRS reaching semgrep) were both real but didn't address this.
