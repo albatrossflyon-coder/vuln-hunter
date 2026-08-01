@@ -9,7 +9,10 @@ Wire into Claude Code's MCP config (e.g. ~/.claude.json) with:
 }
 """
 
+import contextlib
+import faulthandler
 import functools
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -26,6 +29,23 @@ from scanner import get_changed_files, run_scan
 from triage import triage_all
 
 mcp = FastMCP("vuln-hunter")
+
+
+@contextlib.contextmanager
+def _stall_watchdog(seconds: int = 90):
+    """Dumps every thread's real Python stack to stderr if a scan is still
+    running past `seconds`, repeating -- scoped to just the scan call (not
+    left running server-wide) so it only ever fires on an actual stall, not
+    every N seconds during idle time between tool calls. anyio.to_thread offloads
+    the blocking work to a real worker thread, and dump_traceback_later dumps
+    ALL threads by default, so this shows exactly which call the worker thread
+    is stuck in -- the forensic gap that made prior hangs (scan_repo AND
+    scan_diff, both previously reported) undiagnosable."""
+    faulthandler.dump_traceback_later(seconds, repeat=True, file=sys.stderr)
+    try:
+        yield
+    finally:
+        faulthandler.cancel_dump_traceback_later()
 
 
 def _finalize(repo_path: str, findings: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int]:
@@ -70,11 +90,12 @@ async def scan_repo(repo_path: str, ctx: Context) -> str:
     # regardless of vuln-hunter's own internal timeouts. anyio.to_thread.run_sync
     # keeps the event loop free so the server stays alive and report_progress can
     # actually get out.
-    await ctx.report_progress(0, 1, "running semgrep...")
-    raw_findings = await anyio.to_thread.run_sync(functools.partial(run_scan, str(target)))
+    with _stall_watchdog():
+        await ctx.report_progress(0, 1, "running semgrep...")
+        raw_findings = await anyio.to_thread.run_sync(functools.partial(run_scan, str(target)))
 
-    await ctx.report_progress(0.5, 1, f"triaging {len(raw_findings)} finding(s) with Claude...")
-    findings = await anyio.to_thread.run_sync(functools.partial(triage_all, raw_findings))
+        await ctx.report_progress(0.5, 1, f"triaging {len(raw_findings)} finding(s) with Claude...")
+        findings = await anyio.to_thread.run_sync(functools.partial(triage_all, raw_findings))
 
     await ctx.report_progress(1, 1, "done")
     kept, ignored_count = _finalize(repo_path, findings)
@@ -93,15 +114,16 @@ async def scan_diff(repo_path: str, ctx: Context, base_ref: str = "HEAD", deep_r
     except RuntimeError as e:
         return f"Error: {e}"
 
-    await ctx.report_progress(0, 1, "running semgrep...")
-    raw_findings = await anyio.to_thread.run_sync(functools.partial(run_scan, repo_path, files=changed_files))
+    with _stall_watchdog():
+        await ctx.report_progress(0, 1, "running semgrep...")
+        raw_findings = await anyio.to_thread.run_sync(functools.partial(run_scan, repo_path, files=changed_files))
 
-    await ctx.report_progress(0.5, 1, f"triaging {len(raw_findings)} finding(s) with Claude...")
-    findings = await anyio.to_thread.run_sync(functools.partial(triage_all, raw_findings))
+        await ctx.report_progress(0.5, 1, f"triaging {len(raw_findings)} finding(s) with Claude...")
+        findings = await anyio.to_thread.run_sync(functools.partial(triage_all, raw_findings))
 
-    if deep_review:
-        await ctx.report_progress(0.8, 1, "running business-logic review...")
-        findings += await anyio.to_thread.run_sync(functools.partial(business_logic.review_files, changed_files))
+        if deep_review:
+            await ctx.report_progress(0.8, 1, "running business-logic review...")
+            findings += await anyio.to_thread.run_sync(functools.partial(business_logic.review_files, changed_files))
 
     await ctx.report_progress(1, 1, "done")
     kept, ignored_count = _finalize(repo_path, findings)
