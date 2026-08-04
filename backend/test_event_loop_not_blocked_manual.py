@@ -16,6 +16,7 @@ from unittest.mock import patch
 if sys.stdout.encoding != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
 
+import all_scanners
 import mcp_server
 
 
@@ -24,14 +25,12 @@ class _FakeContext:
         pass
 
 
-def _fake_run_scan(target_path, configs=None, files=None):
-    time.sleep(0.5)  # simulates the real blocking semgrep subprocess.run call
+def _fake_run_full_scan(repo_path):
+    # simulates the real blocking work run_full_scan does: semgrep subprocess,
+    # Claude triage, gitleaks/pip-audit/trivy subprocesses -- all now behind
+    # this one function since the 2026-08-03 all_scanners refactor.
+    time.sleep(1.0)
     return []
-
-
-def _fake_triage_all(findings):
-    time.sleep(0.5)  # simulates the real blocking ThreadPoolExecutor.map call
-    return findings
 
 
 async def main():
@@ -43,8 +42,7 @@ async def main():
             heartbeats += 1
             await asyncio.sleep(0.05)
 
-    with patch.object(mcp_server, "run_scan", _fake_run_scan), \
-         patch.object(mcp_server, "triage_all", _fake_triage_all):
+    with patch.object(all_scanners, "run_full_scan", _fake_run_full_scan):
         heartbeat_task = asyncio.create_task(heartbeat())
         start = time.monotonic()
         await mcp_server.scan_repo(repo_path=".", ctx=_FakeContext())

@@ -31,8 +31,16 @@ The most novel piece: a second Claude pass that reasons about *intent* — missi
 
 **This pass found a real bug in vuln-hunter's own code**: no ownership check on the `/ignore` and `/scan` endpoints, plus the ignore-list leaking suppressed-finding info to any caller. Investigating *why* that mattered surfaced a separate, more serious issue — **the server was bound to `0.0.0.0`** (every network interface) instead of localhost, meaning anyone on the same network could have reached those unauthenticated endpoints. Fixed: defaults to `127.0.0.1` now, override via `API_HOST`.
 
+### Git-history secret scanning — `gitleaks.py`
+Wraps gitleaks to catch secrets committed at any point in history, not just the current working tree — `NEVER_READ_PATTERNS` in `scanner.py` only guards the present checkout, so a key committed once and later "removed" is still exposed in every clone. `--redact` confirmed to mask the secret inside gitleaks itself, before the finding is even built. Whole-repo scans only (`scan_repo`, not `scan_diff` — see Known Limitations).
+
+### Dependency CVE scanning — `dep_scan.py` (Python) + `trivy_scan.py` (everything else)
+Semgrep sees the code you wrote; these see the code you imported. `dep_scan.py` wraps PyPA's own `pip-audit` against `requirements.txt` (PyPI Advisory DB + OSV). `trivy_scan.py` wraps Aqua Security's `trivy` for every other ecosystem a real target repo actually uses — Rust/Cargo, npm/yarn, Go modules, Ruby, Java, and more — plus it independently double-checks Python too. Both are deterministic (a known CVE with a known fix version doesn't need an LLM to explain it) so neither goes through `triage.py`. On `scan_diff`, both only re-run when a lockfile they actually read is among the changed files.
+
 ### MCP server — `mcp_server.py`
 Exposes `scan_repo`, `scan_diff`, `ignore_finding`, and `list_ignored` as MCP tools, registered globally so any Claude Code session can call them directly — not just this repo. Verified end to end with real Anthropic API calls against a planted vulnerability fixture, not just imported and assumed working.
+
+Both this and the REST API below call one shared function (`all_scanners.py`) to decide which scanners actually run, rather than each maintaining its own list — gitleaks and pip-audit were added to the REST API on 2026-07-24, one day after this MCP server was first created, and never got mirrored over here until 2026-08-03. `all_scanners.py` exists specifically so that class of drift can't happen again: a new scanner only ever needs adding in one place.
 
 ### SARIF 2.1.0 output
 The format GitHub's Security tab and most CI tooling consume. Output is validated against the real official schema (`schemastore.org/sarif-2.1.0.json`) with `jsonschema`, not eyeballed.
@@ -58,6 +66,16 @@ Next.js 16 + Tailwind 4 dashboard — repo-path input, scan button, findings lis
 cd backend
 pip install -r requirements.txt
 python main.py          # binds to 127.0.0.1:8001 by default
+
+# gitleaks and trivy are separate binaries, not pip packages, resolved via
+# PATH -- install with whatever package manager you actually have. Examples:
+#   gitleaks: winget install Gitleaks.Gitleaks   (or: brew install gitleaks)
+#   trivy:    GOEXPERIMENT=jsonv2 go install github.com/aquasecurity/trivy/cmd/trivy@latest
+# (trivy needs GOEXPERIMENT=jsonv2 as of this writing -- its latest release
+# depends on Go's encoding/json/v2, which is still experimental. Both
+# scanners degrade gracefully to "supplementary scan skipped" if their
+# binary isn't found on PATH, so the rest of vuln-hunter still works
+# without them.)
 
 # Frontend (separate terminal)
 cd frontend
@@ -87,6 +105,7 @@ Then just ask Claude Code to scan a repo or a diff — it'll call the tool direc
 
 ## Known Limitations
 
+- `scan_diff` never runs the gitleaks history scan — a whole-git-history secret check doesn't map onto "just this diff" (an old secret from 5 commits back has nothing to do with what changed now); catching secrets introduced by the diff itself specifically would need gitleaks scoped to the commit range, not built yet
 - Only Python has custom rules written/tested so far (community packs cover other languages, but with the same blind spots noted above)
 - No formal test suite yet — manual smoke tests only (`test_*.py` in `backend/`)
 - Not yet deployed anywhere — runs locally

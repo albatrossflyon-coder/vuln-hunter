@@ -12,13 +12,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-import business_logic
+import all_scanners
 import ignore_store
-from dep_scan import run_pip_audit_scan
-from gitleaks import run_gitleaks_scan
 from sarif import to_sarif
-from scanner import get_changed_files, run_scan
-from triage import triage_all
+from scanner import get_changed_files
 
 app = FastAPI(title="vuln-hunter", version="0.1.0")
 
@@ -90,14 +87,6 @@ def _resolve_repo_dir(repo_path: str) -> str:
     return str(target)
 
 
-def _rule_based_findings(repo_path: str, files: list[str] | None = None) -> list[dict]:
-    try:
-        findings = run_scan(repo_path, files=files)
-        return triage_all(findings)
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 def _finalize(repo_path: str, findings: list[dict]) -> tuple[list[dict], int]:
     """Apply the ignore-list filter across all finding types together, return (kept, ignored_count)."""
     raw_total = len(findings)
@@ -108,11 +97,10 @@ def _finalize(repo_path: str, findings: list[dict]) -> tuple[list[dict], int]:
 @app.post("/scan", response_model=ScanResponse)
 async def scan(request: ScanRequest):
     repo_path = _resolve_repo_dir(request.repo_path)
-    findings = _rule_based_findings(repo_path)
-    # Git-history secret scan and dependency CVE scan, both deterministic --
-    # skip triage.py entirely (see gitleaks.py / dep_scan.py for why).
-    findings += run_gitleaks_scan(repo_path)
-    findings += run_pip_audit_scan(repo_path)
+    try:
+        findings = all_scanners.run_full_scan(repo_path)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
     kept, ignored_count = _finalize(repo_path, findings)
     return ScanResponse(findings=kept, total=len(kept), ignored_count=ignored_count)
 
@@ -128,12 +116,8 @@ async def scan_diff(request: DiffScanRequest):
     can't express. Kept diff-scan-only since it's per-file-expensive; running it
     against a whole repo on every scan wouldn't scale the same way rule scanning does.
 
-    # ponytail: does NOT run the gitleaks history scan (see /scan and
-    # /scan/sarif) -- "diff-only" doesn't map cleanly onto history scanning,
-    # since an old secret from 5 commits back has nothing to do with what
-    # changed in *this* diff. Doing it properly means scoping gitleaks to the
-    # commit range via --log-opts, a separate feature. Add when diff/CI scans
-    # specifically need to catch secrets introduced by the diff itself.
+    Scanner selection (which of gitleaks/pip-audit/trivy actually run here) lives
+    in all_scanners.run_diff_scan -- see its docstring for the reasoning.
     """
     repo_path = _resolve_repo_dir(request.repo_path)
     try:
@@ -141,14 +125,10 @@ async def scan_diff(request: DiffScanRequest):
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    findings = _rule_based_findings(repo_path, files=changed_files)
-    if request.deep_review:
-        findings += business_logic.review_files(changed_files)
-    # Unlike gitleaks (whole-history scan, doesn't fit diff-only), a
-    # dependency CVE check genuinely is diff-scoped: only worth re-running
-    # when requirements.txt itself is one of the changed files.
-    if any(Path(f).name == "requirements.txt" for f in changed_files):
-        findings += run_pip_audit_scan(repo_path)
+    try:
+        findings = all_scanners.run_diff_scan(repo_path, changed_files, deep_review=request.deep_review)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
     kept, ignored_count = _finalize(repo_path, findings)
     return ScanResponse(findings=kept, total=len(kept), ignored_count=ignored_count)
@@ -158,9 +138,10 @@ async def scan_diff(request: DiffScanRequest):
 async def scan_sarif(request: ScanRequest):
     """Same scan, returned as SARIF 2.1.0 for GitHub Security tab / CI tooling."""
     repo_path = _resolve_repo_dir(request.repo_path)
-    findings = _rule_based_findings(repo_path)
-    findings += run_gitleaks_scan(repo_path)
-    findings += run_pip_audit_scan(repo_path)
+    try:
+        findings = all_scanners.run_full_scan(repo_path)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
     kept, _ = _finalize(repo_path, findings)
     return JSONResponse(content=to_sarif(kept))
 

@@ -22,6 +22,44 @@ invents a finding that Semgrep didn't already flag.
 
 ## Changelog
 
+### 2026-08-03/04 — trivy wired in, shared `all_scanners.py` fixes the root cause of the gitleaks/pip-audit gap, 2 more real CVEs found live
+
+Root cause of the previous entry's gap, found by tracing history: `mcp_server.py` was created 2026-07-23; gitleaks + pip-audit landed in `main.py` the very next day, 2026-07-24, and were never mirrored into the just-created MCP file. Two files each independently listing "which scanners run" drifted apart with nothing forcing them back in sync — a structural problem, not a one-time oversight, and it would happen again the next time a scanner got added to only one side.
+
+**Fix:** added `all_scanners.py` — one shared `run_full_scan(repo_path)` and `run_diff_scan(repo_path, changed_files, deep_review)`, both `main.py`'s REST routes and `mcp_server.py`'s MCP tools now call these instead of each keeping their own scanner list. `run_diff_scan` takes an already-resolved `changed_files` list rather than resolving it itself, since main.py (HTTP 400) and mcp_server.py (early-return before the stall-watchdog starts) want different things to happen on a bad `base_ref` — that's caller-specific, not part of "which scanners run."
+
+**Added `trivy_scan.py`** (mirrors `dep_scan.py`'s pattern exactly — deterministic, skips `triage.py`) wrapping Aqua Security's `trivy` for every dependency ecosystem `pip-audit` can't see: Rust/Cargo, npm/yarn, Go, Ruby, Java, and more. Verified live against `delta`'s real `Cargo.lock` (5 real advisories found, including a `git2` undefined-behavior bug) before wiring it in — confirms it's not Python-only despite the video that originally suggested it only being framed around a Python use case.
+
+**Live end-to-end proof, not just "the code looks right":** called the real (patched) `mcp_server.scan_repo` against vuln-hunter's own backend. Result: 7 findings, including **2 `pip-audit` findings that had never appeared through the MCP path before** — `click` 8.1.8 (PYSEC-2026-2132) and `protobuf` 4.25.9 (PYSEC-2026-1805), both HIGH, both real, both missed by every prior `scan_repo`/`scan_diff` call ever run through Claude Code, because the scanner that would have caught them wasn't wired in until this session. Fixed both (`click>=8.3.3`, `protobuf>=5.29.6,<7`) alongside the 4 from the previous entry.
+
+**Real conflict found fixing protobuf, not just click/mcp again:** `protobuf>=5.29.6` alone resolved to 7.35.1, which breaks `opentelemetry-proto`'s own `<7.0` requirement — a genuine upper-bound violation, not just a soft mismatch like the `semgrep==mcp==1.23.3`/`click~=8.1.8` pins. Tightened to `protobuf>=5.29.6,<7`, resolved to 6.33.6 (still within the CVE's fixed-version range, compatible with opentelemetry-proto). semgrep's own `click`/`mcp` pins were checked and confirmed non-blocking again (`semgrep --version` + a real 47-rule scan both still succeed) — semgrep evidently doesn't exercise whatever feature those pins are actually for.
+
+**Verified:** trivy re-scan shows 0 vulnerabilities. All 9 manual regression tests pass, including `test_event_loop_not_blocked_manual.py`, which needed a real fix (not just a re-run) — it mocked `mcp_server.run_scan`/`triage_all` directly, which no longer exist there post-refactor; repointed it to mock `all_scanners.run_full_scan` instead, confirmed it still proves the event loop doesn't block (17 ticks during a simulated 1s scan).
+
+**README updated** to document gitleaks/dep_scan/trivy/all_scanners, which had never been mentioned there at all — confirmed via grep before writing anything, not assumed. Install instructions for gitleaks/trivy corrected mid-edit after checking how gitleaks is *actually* installed on this machine (WinGet, not `go install` as first assumed) rather than guessing.
+
+### 2026-08-03 — 4 real CVEs in own dependencies, found via trivy evaluation
+
+While evaluating trivy as a potential new scan mode (see next entry), ran it against vuln-hunter's own actual installed dependencies (pip freeze, not the loose `>=` ranges in `requirements.txt`) and found **4 real, published, HIGH-severity CVEs**: `cryptography` 49.0.0 (CVE-2026-69247, Bleichenbacher-oracle decryption flaw) and `mcp` 1.23.3 — three CVEs (CVE-2026-52869: HTTP transports serving session requests without auth verification; CVE-2026-52870: experimental task handlers over-exposing access; CVE-2026-59950: WebSocket transport missing Host/Origin validation).
+
+**Fix:** bumped `requirements.txt` to `mcp>=1.28.1,<2` and `cryptography>=50.0.0`, installed in the venv. The `<2` upper bound on `mcp` is deliberate — the same session found the `mcp` PyPI package jumped to a breaking `2.0.0` release that removes `mcp.server.fastmcp` entirely (hit this exact break wiring up a different project's MCP server the same night), and `mcp_server.py` here imports exactly that module.
+
+**Real conflict found and resolved during the fix:** `semgrep` 1.168.0 pins `mcp==1.23.3` as its own dependency — the exact vulnerable version. pip installed 1.29.0 anyway (a warning, not a hard block). Verified this doesn't actually break anything: `semgrep --version` and a real scan both still work, and `mcp.server.fastmcp` imports fine at 1.29.0. semgrep's pin is almost certainly for an optional/unused-by-us MCP feature of its own, not something our subprocess-based `semgrep scan` usage touches.
+
+**Verified:** trivy re-scan shows 0 vulnerabilities post-upgrade. All 8 manual regression tests pass (`test_diff_scan_manual.py`, `test_event_loop_not_blocked_manual.py`, `test_exclude_dirs_manual.py`, `test_ignore_manual.py`, `test_never_read_manual.py`, `test_sarif_manual.py`, `test_business_logic_manual.py`, `test_pipeline_manual.py` — the last one exercises the full pipeline including a real live Claude API triage call, exit code 0).
+
+### 2026-08-03 — External hang diagnostics: `diagnose_hang.ps1` (py-spy, run from outside the process)
+
+`scan_diff` failed a third distinct way tonight — not a visible hang, not "Connection closed," but total silence for the full 1800s idle timeout with zero response or progress. The existing `_stall_watchdog` (faulthandler-based, added 2026-07-27/28) only covers code running inside the `with`-block it wraps in `mcp_server.py` — it can't produce a dump for a hang in a phase it never reaches, or if its stderr output isn't being captured/surfaced back to the caller.
+
+Added `backend/diagnose_hang.ps1`: finds the running `mcp_server.py` python.exe process(es) via `Get-CimInstance Win32_Process` (same pattern already used in this changelog to verify process freshness against fix commits) and attaches `py-spy dump --pid <PID>` to each from *outside* the process, printing every thread's live stack.
+
+**Deliberately not an MCP tool on vuln-hunter's own server.** If vuln-hunter's process is the thing that's frozen, it can't answer any tool call at all, including a self-diagnostic one hosted on the same server — this has to run externally. Considered and rejected wiring py-spy in as a `diagnose_hang` MCP tool for this reason.
+
+**Verified live, not just constructed:** ran it against the actually-running server tonight. Found **two** `mcp_server.py` python.exe processes running simultaneously, same start second. py-spy successfully dumped one (idle, event loop waiting on `asyncio.windows_events`, worker threads idle on a queue — process at rest, as expected for a non-hung state). **py-spy failed to read the other** ("Failed to find python version from target process"). Given this exact investigation thread has hit the "the live process was stale/predates the fix" trap at least three times before (2026-07-27, 2026-07-28, 2026-07-29 entries below), a second, unreadable process sitting alongside the working one is a real lead worth checking next time `scan_diff` hangs — not yet root-caused, just flagged.
+
+**Next time `scan_diff` hangs:** run `powershell -File C:\Repos\vuln-hunter\backend\diagnose_hang.ps1` from an admin-capable shell immediately, before killing/restarting anything. py-spy needs to read the process while it's still stuck to be useful.
+
 ### 2026-07-30 — MCP `scan_repo` hang: live-verified fixed, real process-freshness proof this time
 
 Ran `scan_repo` against `affaan-m/ECC` (the same repo that hung the full 1800s two sessions ago) with a **confirmed-fresh MCP server process** — checked `Get-CimInstance Win32_Process` creation timestamps for both `mcp_server.py` PIDs (11:29:56 AM 2026-07-30) against the last fix commit `438feab` (6:45:57 PM 2026-07-29): process postdates the fix, so this is a real test, not the "assumed fixed, never confirmed" trap from the prior two sessions.

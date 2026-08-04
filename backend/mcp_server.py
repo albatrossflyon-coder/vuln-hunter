@@ -23,10 +23,9 @@ load_dotenv(Path(__file__).parent / ".env")
 
 from mcp.server.fastmcp import Context, FastMCP
 
-import business_logic
+import all_scanners
 import ignore_store
-from scanner import get_changed_files, run_scan
-from triage import triage_all
+from scanner import get_changed_files
 
 mcp = FastMCP("vuln-hunter")
 
@@ -75,9 +74,14 @@ def _format_findings(findings: List[Dict[str, Any]], ignored_count: int) -> str:
 
 @mcp.tool()
 async def scan_repo(repo_path: str, ctx: Context) -> str:
-    """Run a full security scan of a repo (Semgrep detection + Claude triage for
-    explanation/exploitability/fix). Use for a first pass on a whole repo. For
-    just-changed files, use scan_diff instead -- it's much faster."""
+    """Run a full security scan of a repo: Semgrep + Claude triage, a git-history
+    secret scan (gitleaks), and dependency-CVE checks across Python, Rust, npm,
+    Go, and other ecosystems (pip-audit + trivy). Use for a first pass on a whole
+    repo. For just-changed files, use scan_diff instead -- it's much faster.
+
+    Scanner selection lives in all_scanners.run_full_scan -- both this tool and
+    the REST API's /scan route call that one function, so a scanner only ever
+    needs adding in one place."""
     target = Path(repo_path)
     if not target.exists():
         return f"Error: path does not exist: {repo_path}"
@@ -91,11 +95,8 @@ async def scan_repo(repo_path: str, ctx: Context) -> str:
     # keeps the event loop free so the server stays alive and report_progress can
     # actually get out.
     with _stall_watchdog():
-        await ctx.report_progress(0, 1, "running semgrep...")
-        raw_findings = await anyio.to_thread.run_sync(functools.partial(run_scan, str(target)))
-
-        await ctx.report_progress(0.5, 1, f"triaging {len(raw_findings)} finding(s) with Claude...")
-        findings = await anyio.to_thread.run_sync(functools.partial(triage_all, raw_findings))
+        await ctx.report_progress(0, 1, "running semgrep + gitleaks + pip-audit + trivy...")
+        findings = await anyio.to_thread.run_sync(functools.partial(all_scanners.run_full_scan, str(target)))
 
     await ctx.report_progress(1, 1, "done")
     kept, ignored_count = _finalize(repo_path, findings)
@@ -108,7 +109,11 @@ async def scan_diff(repo_path: str, ctx: Context, base_ref: str = "HEAD", deep_r
     much cheaper than scan_repo for iterative work. Set deep_review=True to also
     run a second AI pass for business-logic/access-control issues (missing
     ownership checks, etc.) that rule-matching can't express -- costs one extra
-    Claude call per changed file."""
+    Claude call per changed file.
+
+    Also runs pip-audit/trivy dependency-CVE checks when a lockfile they read is
+    among the changed files -- see all_scanners.run_diff_scan for the reasoning
+    on why gitleaks (whole-history secret scan) doesn't run here."""
     try:
         changed_files = await anyio.to_thread.run_sync(functools.partial(get_changed_files, repo_path, base_ref))
     except RuntimeError as e:
@@ -116,14 +121,9 @@ async def scan_diff(repo_path: str, ctx: Context, base_ref: str = "HEAD", deep_r
 
     with _stall_watchdog():
         await ctx.report_progress(0, 1, "running semgrep...")
-        raw_findings = await anyio.to_thread.run_sync(functools.partial(run_scan, repo_path, files=changed_files))
-
-        await ctx.report_progress(0.5, 1, f"triaging {len(raw_findings)} finding(s) with Claude...")
-        findings = await anyio.to_thread.run_sync(functools.partial(triage_all, raw_findings))
-
-        if deep_review:
-            await ctx.report_progress(0.8, 1, "running business-logic review...")
-            findings += await anyio.to_thread.run_sync(functools.partial(business_logic.review_files, changed_files))
+        findings = await anyio.to_thread.run_sync(
+            functools.partial(all_scanners.run_diff_scan, repo_path, changed_files, deep_review)
+        )
 
     await ctx.report_progress(1, 1, "done")
     kept, ignored_count = _finalize(repo_path, findings)
