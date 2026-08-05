@@ -24,6 +24,23 @@ from trivy_scan import TRIVY_LOCKFILE_NAMES, run_trivy_scan
 from triage import triage_all
 
 
+FULL_SCAN_SCANNERS = ["semgrep", "gitleaks", "pip-audit", "trivy"]
+
+
+def diff_scanners_invoked(changed_files: List[str]) -> List[str]:
+    """Which scanners run_diff_scan will actually invoke for this changed_files
+    set -- semgrep always, pip-audit/trivy conditionally, gitleaks never (see
+    run_diff_scan's docstring). Exposed separately so telemetry instrumentation
+    doesn't have to duplicate this condition."""
+    changed_names = {Path(f).name for f in changed_files}
+    scanners = ["semgrep"]
+    if "requirements.txt" in changed_names:
+        scanners.append("pip-audit")
+    if changed_names & TRIVY_LOCKFILE_NAMES:
+        scanners.append("trivy")
+    return scanners
+
+
 def run_full_scan(repo_path: str) -> List[Dict[str, Any]]:
     """Everything, for a first pass on a whole repo: semgrep+Claude-triage
     (rule_confirmed/ai_reasoning) plus the deterministic scanners (gitleaks
@@ -54,10 +71,10 @@ def run_diff_scan(repo_path: str, changed_files: List[str], deep_review: bool = 
     if deep_review:
         findings += business_logic.review_files(changed_files)
 
-    changed_names = {Path(f).name for f in changed_files}
-    if "requirements.txt" in changed_names:
+    invoked = diff_scanners_invoked(changed_files)
+    if "pip-audit" in invoked:
         findings += run_pip_audit_scan(repo_path)
-    if changed_names & TRIVY_LOCKFILE_NAMES:
+    if "trivy" in invoked:
         findings += run_trivy_scan(repo_path)
 
     return findings

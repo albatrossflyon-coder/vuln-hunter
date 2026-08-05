@@ -9,6 +9,9 @@ pip-audit>=2.7.0
 cryptography>=50.0.0
 click>=8.3.3
 protobuf>=5.29.6,<7
+psutil>=6.0.0
+textual>=0.53.0
+rich>=13.7.0
 
 # dev/test only
 jsonschema>=4.25.0

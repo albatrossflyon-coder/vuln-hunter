@@ -25,6 +25,7 @@ from mcp.server.fastmcp import Context, FastMCP
 
 import all_scanners
 import ignore_store
+import telemetry
 from scanner import get_changed_files
 
 mcp = FastMCP("vuln-hunter")
@@ -94,12 +95,23 @@ async def scan_repo(repo_path: str, ctx: Context) -> str:
     # regardless of vuln-hunter's own internal timeouts. anyio.to_thread.run_sync
     # keeps the event loop free so the server stays alive and report_progress can
     # actually get out.
-    with _stall_watchdog():
-        await ctx.report_progress(0, 1, "running semgrep + gitleaks + pip-audit + trivy...")
-        findings = await anyio.to_thread.run_sync(functools.partial(all_scanners.run_full_scan, str(target)))
+    scan_id = telemetry.start_scan(repo_path, tool="mcp:scan_repo")
+    try:
+        with _stall_watchdog():
+            await ctx.report_progress(0, 1, "running semgrep + gitleaks + pip-audit + trivy...")
+            findings = await anyio.to_thread.run_sync(functools.partial(all_scanners.run_full_scan, str(target)))
+    except Exception as e:
+        # A hard process crash/kill never reaches this except -- that's what
+        # telemetry.reconcile_stale() catches reactively on the next dashboard
+        # poll. This only catches exceptions the process survives long enough
+        # to raise.
+        telemetry.log_stopper_bug(scan_id, "mcp_server.scan_repo", str(e), exc=e)
+        raise
 
+    telemetry.record_scan_results(scan_id, all_scanners.FULL_SCAN_SCANNERS, findings)
     await ctx.report_progress(1, 1, "done")
     kept, ignored_count = _finalize(repo_path, findings)
+    telemetry.complete_scan(scan_id, status="COMPLETED")
     return _format_findings(kept, ignored_count)
 
 
@@ -119,14 +131,21 @@ async def scan_diff(repo_path: str, ctx: Context, base_ref: str = "HEAD", deep_r
     except RuntimeError as e:
         return f"Error: {e}"
 
-    with _stall_watchdog():
-        await ctx.report_progress(0, 1, "running semgrep...")
-        findings = await anyio.to_thread.run_sync(
-            functools.partial(all_scanners.run_diff_scan, repo_path, changed_files, deep_review)
-        )
+    scan_id = telemetry.start_scan(repo_path, tool="mcp:scan_diff")
+    try:
+        with _stall_watchdog():
+            await ctx.report_progress(0, 1, "running semgrep...")
+            findings = await anyio.to_thread.run_sync(
+                functools.partial(all_scanners.run_diff_scan, repo_path, changed_files, deep_review)
+            )
+    except Exception as e:
+        telemetry.log_stopper_bug(scan_id, "mcp_server.scan_diff", str(e), exc=e)
+        raise
 
+    telemetry.record_scan_results(scan_id, all_scanners.diff_scanners_invoked(changed_files), findings)
     await ctx.report_progress(1, 1, "done")
     kept, ignored_count = _finalize(repo_path, findings)
+    telemetry.complete_scan(scan_id, status="COMPLETED")
     return _format_findings(kept, ignored_count)
 
 

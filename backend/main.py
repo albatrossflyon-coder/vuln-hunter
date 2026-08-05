@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 import all_scanners
 import ignore_store
+import telemetry
 from sarif import to_sarif
 from scanner import get_changed_files
 
@@ -97,11 +98,18 @@ def _finalize(repo_path: str, findings: list[dict]) -> tuple[list[dict], int]:
 @app.post("/scan", response_model=ScanResponse)
 async def scan(request: ScanRequest):
     repo_path = _resolve_repo_dir(request.repo_path)
+    scan_id = telemetry.start_scan(repo_path, tool="rest:/scan")
     try:
         findings = all_scanners.run_full_scan(repo_path)
     except RuntimeError as e:
+        telemetry.log_stopper_bug(scan_id, "main./scan", str(e), exc=e)
         raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        telemetry.log_stopper_bug(scan_id, "main./scan", f"unexpected: {e}", exc=e)
+        raise
+    telemetry.record_scan_results(scan_id, all_scanners.FULL_SCAN_SCANNERS, findings)
     kept, ignored_count = _finalize(repo_path, findings)
+    telemetry.complete_scan(scan_id, status="COMPLETED")
     return ScanResponse(findings=kept, total=len(kept), ignored_count=ignored_count)
 
 
@@ -125,12 +133,19 @@ async def scan_diff(request: DiffScanRequest):
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    scan_id = telemetry.start_scan(repo_path, tool="rest:/scan/diff")
     try:
         findings = all_scanners.run_diff_scan(repo_path, changed_files, deep_review=request.deep_review)
     except RuntimeError as e:
+        telemetry.log_stopper_bug(scan_id, "main./scan/diff", str(e), exc=e)
         raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        telemetry.log_stopper_bug(scan_id, "main./scan/diff", f"unexpected: {e}", exc=e)
+        raise
 
+    telemetry.record_scan_results(scan_id, all_scanners.diff_scanners_invoked(changed_files), findings)
     kept, ignored_count = _finalize(repo_path, findings)
+    telemetry.complete_scan(scan_id, status="COMPLETED")
     return ScanResponse(findings=kept, total=len(kept), ignored_count=ignored_count)
 
 
@@ -172,6 +187,21 @@ async def list_ignored(repo_path: str):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/telemetry/summary")
+async def telemetry_summary(hours: int = 24):
+    return telemetry.get_telemetry_summary(hours=hours)
+
+
+@app.get("/telemetry/repos")
+async def telemetry_repos():
+    return telemetry.get_repo_staleness()
+
+
+@app.get("/telemetry/events")
+async def telemetry_events(limit: int = 30):
+    return telemetry.get_recent_events(limit=limit)
 
 
 if __name__ == "__main__":
