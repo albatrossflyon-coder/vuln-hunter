@@ -7,10 +7,11 @@ live check against the actual pip-audit binary and the real OSV/PyPI
 advisory data, not a mock.
 """
 
+import sys
 import tempfile
 from pathlib import Path
 
-from dep_scan import run_pip_audit_scan
+from dep_scan import _is_self_scan, run_pip_audit_scan
 
 with tempfile.TemporaryDirectory() as tmpdir:
     repo = Path(tmpdir)
@@ -42,4 +43,21 @@ with tempfile.TemporaryDirectory() as tmpdir:
     with tempfile.TemporaryDirectory() as empty_dir:
         assert run_pip_audit_scan(empty_dir) == []
 
-print(f"test_dep_scan: all checks passed ({len(findings)} findings for urllib3==1.26.4)")
+# _is_self_scan: True only when the running interpreter lives inside repo_path.
+assert _is_self_scan(Path(sys.executable).resolve().parent.parent) is True
+with tempfile.TemporaryDirectory() as unrelated_dir:
+    assert _is_self_scan(Path(unrelated_dir)) is False
+
+# Regression check for the real bug: auditing THIS repo's own requirements.txt
+# used to crash pip-audit entirely (see BUILDLOG 2026-08-04) -- click/mcp are
+# deliberately pinned here past what semgrep itself declares, which a fresh
+# `pip install -r` can never resolve, and on Windows pip backtracks into old
+# semgrep versions whose setup.py hard-exceptions instead of failing cleanly.
+# _is_self_scan should route this through environment-mode audit instead,
+# which just reports on installed packages and can't hit that resolver at all.
+self_repo = Path(__file__).resolve().parent
+self_findings = run_pip_audit_scan(str(self_repo))
+assert isinstance(self_findings, list), "self-scan must not raise"
+
+print(f"test_dep_scan: all checks passed ({len(findings)} findings for urllib3==1.26.4, "
+      f"{len(self_findings)} findings on self-scan)")

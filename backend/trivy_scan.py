@@ -20,7 +20,7 @@ import json
 import shutil
 import sys
 from pathlib import Path
-from subprocess import run, TimeoutExpired
+from subprocess import DEVNULL, run, TimeoutExpired
 from typing import Any, Dict, List
 
 FINDING_TYPE = "dependency_cve"
@@ -53,8 +53,12 @@ def run_trivy_scan(repo_path: str) -> List[Dict[str, Any]]:
     supplementary layer like dep_scan.py, its absence should never break a scan.
     """
     cmd = [_trivy_executable(), "fs", "--scanners", "vuln", "--format", "json", "--quiet", repo_path]
+    # stdin=DEVNULL: same fix as scanner.py's semgrep call -- a subprocess
+    # spawned from an MCP server inherits its stdin (the JSON-RPC stdio pipe
+    # to Claude Code) by default and never sees EOF, since that connection
+    # stays open for the session.
     try:
-        result = run(cmd, capture_output=True, text=True, timeout=180)
+        result = run(cmd, stdin=DEVNULL, capture_output=True, text=True, timeout=180)
     except TimeoutExpired:
         raise RuntimeError("trivy scan exceeded the 180s timeout")
     except FileNotFoundError:

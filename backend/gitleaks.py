@@ -55,8 +55,12 @@ def run_gitleaks_scan(repo_path: str) -> List[Dict[str, Any]]:
             "--exit-code", "0",
             repo_path,
         ]
+        # stdin=DEVNULL: same fix as scanner.py's semgrep call -- a subprocess
+        # spawned from an MCP server inherits its stdin (the JSON-RPC stdio
+        # pipe to Claude Code) by default and never sees EOF, since that
+        # connection stays open for the session.
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            result = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
         except subprocess.TimeoutExpired:
             raise RuntimeError("gitleaks scan exceeded the 120s timeout")
         if result.returncode != 0:

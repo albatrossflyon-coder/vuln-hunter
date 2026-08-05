@@ -18,7 +18,7 @@ import json
 import shutil
 import sys
 from pathlib import Path
-from subprocess import run, TimeoutExpired
+from subprocess import DEVNULL, run, TimeoutExpired
 from typing import Any, Dict, List
 
 FINDING_TYPE = "dependency_cve"
@@ -34,18 +34,53 @@ def _pip_audit_executable() -> str:
     return shutil.which("pip-audit") or "pip-audit"
 
 
+def _is_self_scan(repo_path: Path) -> bool:
+    """True when the interpreter running this scan lives inside repo_path --
+    i.e. we're auditing the exact project we're already installed in, so the
+    real installed environment can be audited directly instead of asking pip
+    to re-resolve requirements.txt from scratch.
+
+    That resolve can be permanently unresolvable even though the environment
+    itself works fine: this repo's own requirements.txt pins click/mcp past
+    what semgrep itself declares (semgrep==1.168.0 wants click~=8.1.8,
+    mcp==1.23.3), a deliberate, verified-working CVE-fix override that a
+    fresh `pip install -r` can never satisfy. On Windows it's worse than a
+    clean "unresolvable" error: pip backtracks through old semgrep versions
+    looking for a compatible combination, and versions predating Windows
+    wheel support (pre-1.11x) raise a hard exception from their own setup.py
+    ("Semgrep does not support Windows yet") instead of just failing to
+    build, which pip-audit surfaces as a crash rather than a normal result.
+    """
+    try:
+        Path(sys.executable).resolve().relative_to(repo_path.resolve())
+        return True
+    except ValueError:
+        return False
+
+
 def run_pip_audit_scan(repo_path: str) -> List[Dict[str, Any]]:
     """Scan repo_path/requirements.txt for known-CVE dependencies. Returns []
     if there's no requirements.txt -- this is a supplementary layer, not the
     primary scan, so its absence should never break a scan.
     """
-    req_file = Path(repo_path) / REQUIREMENTS_FILENAME
+    repo = Path(repo_path)
+    req_file = repo / REQUIREMENTS_FILENAME
     if not req_file.exists():
         return []
 
-    cmd = [_pip_audit_executable(), "-r", str(req_file), "-f", "json"]
+    if _is_self_scan(repo):
+        cmd = [_pip_audit_executable(), "-f", "json"]
+    else:
+        cmd = [_pip_audit_executable(), "-r", str(req_file), "-f", "json"]
+
+    # stdin=DEVNULL: same fix as scanner.py's semgrep call -- a subprocess
+    # spawned from an MCP server inherits its stdin (the JSON-RPC stdio pipe
+    # to Claude Code) by default, and never sees EOF since that connection
+    # stays open for the session. Confirmed live: this exact command
+    # (pip-audit -f json, ~5s standalone) hung the full 180s timeout every
+    # time when run through the live MCP server, and only there.
     try:
-        result = run(cmd, capture_output=True, text=True, timeout=180)
+        result = run(cmd, stdin=DEVNULL, capture_output=True, text=True, timeout=180)
     except TimeoutExpired:
         raise RuntimeError("pip-audit scan exceeded the 180s timeout")
 

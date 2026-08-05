@@ -10,4 +10,6 @@ out/
 build/
 *.log
 .DS_Store
+backend/vuln_hunter_telemetry.db
+backend/vuln_hunter_events.jsonl
 assets/golden-eagle-source.jpg
