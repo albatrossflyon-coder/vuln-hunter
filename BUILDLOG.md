@@ -22,6 +22,22 @@ invents a finding that Semgrep didn't already flag.
 
 ## Changelog
 
+### 2026-08-06 — Dashboard gauges, live URL-scan box, and real deploy to Vercel + Render
+
+Shipped the deploy from the previous session's staged plan, with real changes to the shape of it along the way.
+
+**Dashboard (frontend):** Replaced flat success-rate/false-positive stat tiles with animated radial gauges (270° sweep, ascending color bands matching the existing tone logic). Added a "scan a repo" box — drop in a URL, it clones and runs a real scan live, with a real elapsed-time counter (not fake progress theater). Bolder header pass: brought the H1 up to the same uppercase/letter-spaced HUD convention the rest of the page already used (was the one place quietly opting out of it), added a live pulse indicator. Fixed a real mobile bug: header and gauge row weren't centering under 640px width (styled-jsx media query fix).
+
+**Backend:** New `POST /scan/url` endpoint (clone → scan → cleanup, 120s clone timeout). All scan-triggering endpoints (`/scan`, `/scan/url`, `/scan/diff`, `/scan/sarif`, `/ignore`) now sit behind an optional `SCAN_API_KEY` check — unset locally so CLI/local use stays frictionless, enforced only when the hosted deploy sets it.
+
+**Public/private split:** the public hosted site shows the scan box (visible, matches the portfolio "wow" goal) but it's genuinely gated — a Next.js server-side proxy route (`/api/scan-url`) holds the real `SCAN_API_KEY` and checks a separate `SCAN_BOX_PASSWORD`, so the real backend key never reaches the browser. Confirmed live: wrong/blank password → real 401 from the deployed site, not just a UI trick.
+
+**Deploy — changed from the staged plan:** frontend on Vercel as planned (`https://frontend-beta-eight-46.vercel.app`, free tier). Backend moved from the originally-planned Fly.io to **Render** instead (`https://vuln-hunter-backend.onrender.com`, free tier) — Chris already had a Render account and wanted the free option over Fly.io's paid always-on pricing. Trade-off accepted knowingly: Render's free tier sleeps after ~15 min idle, cold-starts ~30-60s on the next request.
+
+**Real bug found and fixed along the way:** `requirements.txt`'s `click>=8.3.3`/`rich>=13.7.0` pins (a verified-working CVE-fix override past what `semgrep`'s own metadata declares) make a single `pip install -r requirements.txt` unresolvable from a genuinely clean environment — confirmed live on the first Render build attempt (`ResolutionImpossible` across every semgrep version 1.90.0–1.124.0). Previously only ever worked because the local Windows venv was built incrementally, never resolved atomically from scratch. Fixed in `Dockerfile`: install semgrep alone first (its real dependency tree resolves fully and correctly with nothing else present to conflict), then the rest of `requirements.txt` on top. Confirmed live: second Render deploy succeeded, `/health` and `/telemetry/*` both verified working through the real public URL.
+
+**Not done / found but not investigated:** a stray `vuln-hunter/vuln-hunter/` nested folder inside the repo root (its own `.git`, an old BUILDLOG dated 2026-07-09) — untracked, not touched, needs a look. `C:\Repos\vuln-hunter.zip` (301MB, dated 2026-07-22) confirmed stale/unused, safe to delete whenever. GitHub profile "watch it scan live" theatrical demo effect — explicitly deferred to a future session, not started.
+
 ### 2026-08-05 — Fixed the pip-audit self-scan crash and hang, added a plain CLI entrypoint
 
 Closes the pip-audit item that's been sitting in Pending since the dashboard shipped: `pip-audit -r requirements.txt` crashed every time vuln-hunter scanned its own repo, and turned out to be **two separate real bugs**, both confirmed live, not just reasoned about.
@@ -425,29 +441,15 @@ Added `pip-audit>=2.7.0` to `requirements.txt`.
 
 ## Pending
 
-### Deploy plan — Vercel (frontend) + Fly.io (backend), staged, not yet started
+### Deploy — DONE 2026-08-06, see that changelog entry for full detail
 
-Decided 2026-08-05, after Chris looked at the dashboard live (localhost) and liked it but wants it real and hosted — on the public GitHub repo README/profile page, "impress people" bar, open-source-with-a-paid-tier model (open-core: free engine, hosted version adds auth/multi-tenancy/rate-limited public scanning). Explicit call: don't rush this into a single session — a real two-platform deploy with auth almost always hits an unexpected snag, and shipping a rushed half-deploy is worse than staging it properly. This is the concrete plan to execute cold in a future session.
+Live at `https://frontend-beta-eight-46.vercel.app` (Vercel) + `https://vuln-hunter-backend.onrender.com` (Render, not Fly.io — changed mid-build, see changelog). API-key gate + password-gated public scan box shipped instead of the originally-planned allowlist-scope decision.
 
-**Why split the deploy:**
-- Frontend (Next.js dashboard) → **Vercel**. Natural fit, Vercel MCP tools already connected in Claude Code, low-friction deploy.
-- Backend (FastAPI; shells out to real semgrep/gitleaks/pip-audit/trivy binaries; needs to `git clone` arbitrary repos) → **Fly.io**, not Vercel. Serverless functions have execution time limits and no persistent filesystem to clone into — this needs a real always-on container.
-
-**Must-have before the backend is reachable from anywhere but localhost** (currently `main.py` is deliberately 127.0.0.1-only, see comment at its `uvicorn.run` call):
-1. API-key middleware on the FastAPI backend — reject any request without a valid key. Key lives server-side only (Vercel env var → server-side fetch to the Fly.io backend), never shipped to browser JS.
-2. Rate limiting per key/IP, since each scan burns real compute (semgrep/gitleaks/trivy) and a real Anthropic API cost (Claude triage per finding) — no cap today means no cost ceiling.
-3. If the public GitHub-profile demo lets visitors submit an arbitrary URL to scan (the actual "wow" feature Chris wants), that URL becomes a `git clone` target on your infrastructure — needs a scope decision: curated/allowlisted repos only for the public demo (safe, fast to build) vs. truly arbitrary input (real feature, needs sandboxing + hard timeouts + probably a queue, bigger build). Chris wants to start with "get it up and looking good," not necessarily arbitrary-input day one — stage this as its own decision point, don't default to arbitrary input without discussing scope first.
-4. Cost-tiering decision for the triage LLM call: free/open-source tier could use a cheaper open-weight model (DeepSeek, Qwen, etc. — exact choice not yet picked) instead of Claude, paid tier keeps Claude. This needs actually wiring an alternate provider into `triage.py` (currently hardcoded to Anthropic) — real code work, not just a config flag.
-
-**Rough execution order for next session:**
-1. Write the Fly.io `Dockerfile` for `backend/` (Python + semgrep + gitleaks + trivy + git installed, matches what `backend/venv` already has working locally)
-2. Add API-key check middleware to `main.py`, wire the key through env vars on both platforms
-3. Deploy backend to Fly.io, confirm `/health` reachable and a real scan works end-to-end against the hosted instance
-4. Deploy frontend to Vercel, point `API_URL` at the Fly.io backend
-5. Decide + implement the public-demo scan-scope question (#3 above) before linking it from the GitHub profile page
-6. Only then: link it from the repo README / GitHub profile page
-
-**Explicitly not decided yet, flag before building:** exact cheap-model choice for the free tier, whether there's a paid tier at all yet or just "free hosted demo" for now, domain/URL for the hosted instance, pricing if a paid tier happens.
+**Still genuinely open:**
+1. **No rate limiting yet.** The password gate prevents casual public use, but if the password ever leaks there's still no per-IP/per-key cap on scan volume — real cost exposure (Anthropic API + compute) stays technically uncapped. Worth adding before this gets linked anywhere public-facing.
+2. **Cost-tiering for the triage LLM never got built** — free tier still uses the same Claude call as everything else, since public access is gated rather than open. Only becomes relevant if the scope ever changes to open public access.
+3. **Not linked from the GitHub profile/README yet** — deploy is live but not yet publicized.
+4. GitHub profile "watch it scan live" theatrical demo effect — a separate, bigger piece, explicitly deferred by Chris, not started.
 
 ### Other pending
 - [ ] `mcp_process_count` read 2 live during dashboard testing (2026-08-04) — corroborates the unconfirmed "6 simultaneous processes" lead from the same night's earlier crash investigation; now has a real-time indicator instead of a one-off observation
