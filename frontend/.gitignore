@@ -8,3 +8,5 @@ npm-debug.log*
 .env*
 *.tsbuildinfo
 next-env.d.ts
+
+.vercel

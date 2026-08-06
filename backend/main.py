@@ -1,13 +1,17 @@
 """FastAPI server: POST /scan {repo_path} -> triaged security findings."""
 
 import os
+import re
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent / ".env")
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -18,6 +22,11 @@ import telemetry
 from sarif import to_sarif
 from scanner import get_changed_files
 
+# Only http(s) git URLs -- this box runs on your own machine against your own
+# git binary, so it's equivalent to typing `git clone <url>` yourself. This
+# just blocks the obviously-wrong inputs (local paths, non-git schemes).
+_GIT_URL_RE = re.compile(r"^https?://\S+$")
+
 app = FastAPI(title="vuln-hunter", version="0.1.0")
 
 app.add_middleware(
@@ -27,6 +36,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def require_scan_key(x_api_key: str | None = Header(default=None)):
+    """Gate the scan-triggering endpoints behind SCAN_API_KEY. Unset locally
+    on purpose -- local dev/CLI use stays frictionless. Only the hosted
+    instance sets this, so only the hosted instance enforces it. Read-only
+    /telemetry/* and /health stay open regardless -- that's the public demo.
+    """
+    expected = os.getenv("SCAN_API_KEY")
+    if expected and x_api_key != expected:
+        raise HTTPException(status_code=401, detail="Missing or invalid X-API-Key")
 
 
 class ScanRequest(BaseModel):
@@ -95,7 +115,7 @@ def _finalize(repo_path: str, findings: list[dict]) -> tuple[list[dict], int]:
     return kept, raw_total - len(kept)
 
 
-@app.post("/scan", response_model=ScanResponse)
+@app.post("/scan", response_model=ScanResponse, dependencies=[Depends(require_scan_key)])
 async def scan(request: ScanRequest):
     repo_path = _resolve_repo_dir(request.repo_path)
     scan_id = telemetry.start_scan(repo_path, tool="rest:/scan")
@@ -113,7 +133,50 @@ async def scan(request: ScanRequest):
     return ScanResponse(findings=kept, total=len(kept), ignored_count=ignored_count)
 
 
-@app.post("/scan/diff", response_model=ScanResponse)
+class ScanUrlRequest(BaseModel):
+    url: str
+
+
+@app.post("/scan/url", response_model=ScanResponse, dependencies=[Depends(require_scan_key)])
+async def scan_url(request: ScanUrlRequest):
+    """Clone a git URL into a scratch dir and run the same scan /scan does.
+    Local-only feature (this server binds 127.0.0.1) -- equivalent to running
+    `git clone` yourself, not a public-facing capability.
+    """
+    if not _GIT_URL_RE.match(request.url.strip()):
+        raise HTTPException(status_code=400, detail="Expected an http(s) git URL")
+
+    dest = tempfile.mkdtemp(prefix="vuln-hunter-scan-")
+    try:
+        clone = subprocess.run(
+            ["git", "clone", "--depth", "1", request.url.strip(), dest],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if clone.returncode != 0:
+            raise HTTPException(status_code=400, detail=f"git clone failed: {clone.stderr.strip()[:500]}")
+
+        scan_id = telemetry.start_scan(dest, tool="rest:/scan/url")
+        try:
+            findings = all_scanners.run_full_scan(dest)
+        except RuntimeError as e:
+            telemetry.log_stopper_bug(scan_id, "main./scan/url", str(e), exc=e)
+            raise HTTPException(status_code=500, detail=str(e))
+        except Exception as e:
+            telemetry.log_stopper_bug(scan_id, "main./scan/url", f"unexpected: {e}", exc=e)
+            raise
+        telemetry.record_scan_results(scan_id, all_scanners.FULL_SCAN_SCANNERS, findings)
+        kept, ignored_count = _finalize(dest, findings)
+        telemetry.complete_scan(scan_id, status="COMPLETED")
+        return ScanResponse(findings=kept, total=len(kept), ignored_count=ignored_count)
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=400, detail="git clone timed out after 120s")
+    finally:
+        shutil.rmtree(dest, ignore_errors=True)
+
+
+@app.post("/scan/diff", response_model=ScanResponse, dependencies=[Depends(require_scan_key)])
 async def scan_diff(request: DiffScanRequest):
     """Scan only files changed vs base_ref (default: uncommitted changes) instead
     of the whole repo -- for practical PR/CI use where re-scanning everything
@@ -149,7 +212,7 @@ async def scan_diff(request: DiffScanRequest):
     return ScanResponse(findings=kept, total=len(kept), ignored_count=ignored_count)
 
 
-@app.post("/scan/sarif")
+@app.post("/scan/sarif", dependencies=[Depends(require_scan_key)])
 async def scan_sarif(request: ScanRequest):
     """Same scan, returned as SARIF 2.1.0 for GitHub Security tab / CI tooling."""
     repo_path = _resolve_repo_dir(request.repo_path)
@@ -161,7 +224,7 @@ async def scan_sarif(request: ScanRequest):
     return JSONResponse(content=to_sarif(kept))
 
 
-@app.post("/ignore")
+@app.post("/ignore", dependencies=[Depends(require_scan_key)])
 async def ignore_finding(request: IgnoreRequest):
     """Mark a finding as safe so it doesn't resurface on future scans of this repo."""
     repo_path = _resolve_repo_dir(request.repo_path)
@@ -169,7 +232,7 @@ async def ignore_finding(request: IgnoreRequest):
     return {"status": "ignored", "fingerprint": request.fingerprint}
 
 
-@app.delete("/ignore/{fingerprint_id}")
+@app.delete("/ignore/{fingerprint_id}", dependencies=[Depends(require_scan_key)])
 async def unignore_finding(fingerprint_id: str, repo_path: str):
     repo_path = _resolve_repo_dir(repo_path)
     removed = ignore_store.remove_ignore(repo_path, fingerprint_id)

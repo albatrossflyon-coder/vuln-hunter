@@ -124,6 +124,71 @@ function ScannerBarChart({ volumes }: { volumes: Record<string, number> }) {
   );
 }
 
+function RadialGauge({
+  value,
+  max,
+  displayValue,
+  label,
+  sub,
+  color,
+}: {
+  value: number;
+  max: number;
+  displayValue: string;
+  label: string;
+  sub: string;
+  color: string;
+}) {
+  const pct = Math.max(0, Math.min(1, value / max));
+  // 270-degree sweep gauge (a full circle reads as a pie/clock, not a meter).
+  const sweep = 270;
+  const r = 58;
+  const circumference = 2 * Math.PI * r * (sweep / 360);
+  return (
+    <motion.div
+      layout
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.3 }}
+      style={{
+        background: COLOR.surface,
+        border: `1px solid ${color === COLOR.inkMuted ? COLOR.grid : color}55`,
+        borderRadius: 10,
+        padding: "16px 18px",
+        boxShadow: `0 1px 0 rgba(255,255,255,0.03) inset, 0 10px 28px rgba(0,0,0,0.4), 0 6px 24px ${color === COLOR.inkMuted ? "transparent" : color + "40"}`,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        width: 190,
+      }}
+    >
+      <div style={{ fontSize: 11, letterSpacing: 0.6, textTransform: "uppercase", color: COLOR.inkMuted, alignSelf: "flex-start" }}>{label}</div>
+      <svg width={150} height={132} viewBox="0 0 130 130" style={{ marginTop: 4 }}>
+        <g transform="rotate(135 65 65)">
+          <circle cx={65} cy={65} r={r} fill="none" stroke={COLOR.grid} strokeWidth={11} strokeDasharray={`${circumference} ${2 * Math.PI * r}`} strokeLinecap="round" />
+          <motion.circle
+            cx={65}
+            cy={65}
+            r={r}
+            fill="none"
+            stroke={color}
+            strokeWidth={11}
+            strokeLinecap="round"
+            strokeDasharray={`${circumference} ${2 * Math.PI * r}`}
+            initial={{ strokeDashoffset: circumference }}
+            animate={{ strokeDashoffset: circumference * (1 - pct) }}
+            transition={{ duration: 0.6, ease: "easeOut" }}
+          />
+        </g>
+        <text x={65} y={73} textAnchor="middle" fontSize={26} fontWeight={700} fill={color} style={{ fontVariantNumeric: "tabular-nums" }}>
+          {displayValue}
+        </text>
+      </svg>
+      <div style={{ fontSize: 12, color: COLOR.inkSecondary, textAlign: "center", marginTop: -6 }}>{sub}</div>
+    </motion.div>
+  );
+}
+
 function SeverityBar({ sev }: { sev: Summary["severity_breakdown"] }) {
   const total = sev.critical + sev.high + sev.medium + sev.low;
   const segs: [string, number, string][] = [
@@ -158,6 +223,145 @@ function SeverityBar({ sev }: { sev: Summary["severity_breakdown"] }) {
         ))}
       </div>
     </div>
+  );
+}
+
+type ScanUrlFinding = { severity: string };
+type ScanUrlResult = { total: number; ignored_count: number; findings: ScanUrlFinding[] };
+
+function ScanUrlBox() {
+  const [url, setUrl] = useState("");
+  const [password, setPassword] = useState("");
+  const [status, setStatus] = useState<"idle" | "scanning" | "done" | "error">("idle");
+  const [elapsed, setElapsed] = useState(0);
+  const [result, setResult] = useState<ScanUrlResult | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (status !== "scanning") return;
+    const start = Date.now();
+    const id = setInterval(() => setElapsed(Math.floor((Date.now() - start) / 1000)), 1000);
+    return () => clearInterval(id);
+  }, [status]);
+
+  async function runScan() {
+    if (!url.trim() || status === "scanning") return;
+    setStatus("scanning");
+    setElapsed(0);
+    setResult(null);
+    setError("");
+    try {
+      // Same-origin Next.js route, not the Fly.io backend directly -- it holds
+      // the real API key server-side and checks the password, so nothing
+      // secret ever reaches this browser tab.
+      const res = await fetch("/api/scan-url", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: url.trim(), password }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "scan failed");
+      setResult(data);
+      setStatus("done");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "scan failed");
+      setStatus("error");
+    }
+  }
+
+  const sevCount = (sev: string) => result?.findings.filter((f) => f.severity.toLowerCase() === sev).length ?? 0;
+
+  return (
+    <motion.div
+      layout
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.3 }}
+      style={{
+        background: COLOR.surface,
+        border: `1px solid ${COLOR.grid}`,
+        borderRadius: 10,
+        padding: "16px 18px",
+        boxShadow: "0 1px 0 rgba(255,255,255,0.03) inset, 0 8px 24px rgba(0,0,0,0.35)",
+        flex: "1 1 260px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 10,
+      }}
+    >
+      <div style={{ fontSize: 11, letterSpacing: 0.6, textTransform: "uppercase", color: COLOR.inkMuted }}>Scan a repo</div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <input
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && runScan()}
+          placeholder="https://github.com/owner/repo"
+          disabled={status === "scanning"}
+          style={{
+            flex: 1,
+            background: COLOR.page,
+            border: `1px solid ${COLOR.grid}`,
+            borderRadius: 6,
+            padding: "8px 10px",
+            color: COLOR.ink,
+            fontSize: 13,
+            fontFamily: "monospace",
+          }}
+        />
+        <input
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && runScan()}
+          placeholder="password"
+          type="password"
+          disabled={status === "scanning"}
+          style={{
+            width: 100,
+            background: COLOR.page,
+            border: `1px solid ${COLOR.grid}`,
+            borderRadius: 6,
+            padding: "8px 10px",
+            color: COLOR.ink,
+            fontSize: 13,
+            fontFamily: "monospace",
+          }}
+        />
+        <button
+          onClick={runScan}
+          disabled={status === "scanning" || !url.trim()}
+          style={{
+            background: status === "scanning" ? COLOR.grid : COLOR.seqBlue,
+            border: "none",
+            borderRadius: 6,
+            padding: "0 16px",
+            color: COLOR.ink,
+            fontSize: 13,
+            fontWeight: 600,
+            cursor: status === "scanning" || !url.trim() ? "default" : "pointer",
+          }}
+        >
+          Scan
+        </button>
+      </div>
+      <div style={{ fontFamily: "monospace", fontSize: 12, minHeight: 18 }}>
+        {status === "idle" && <span style={{ color: COLOR.inkMuted }}>Clones the repo and runs semgrep / gitleaks / pip-audit / trivy against it, live.</span>}
+        {status === "scanning" && (
+          <motion.span animate={{ opacity: [1, 0.4, 1] }} transition={{ duration: 1.2, repeat: Infinity }} style={{ color: COLOR.seqBlue }}>
+            &gt; scanning… {elapsed}s elapsed
+          </motion.span>
+        )}
+        {status === "error" && <span style={{ color: COLOR.critical }}>&gt; {error}</span>}
+        {status === "done" && result && (
+          <span style={{ color: COLOR.ink }}>
+            &gt; {result.total} finding(s) in {elapsed}s —{" "}
+            <span style={{ color: COLOR.critical }}>{sevCount("critical")} crit</span>,{" "}
+            <span style={{ color: COLOR.serious }}>{sevCount("high")} high</span>,{" "}
+            <span style={{ color: COLOR.warning }}>{sevCount("medium")} med</span>,{" "}
+            <span style={{ color: COLOR.good }}>{sevCount("low")} low</span>
+          </span>
+        )}
+      </div>
+    </motion.div>
   );
 }
 
@@ -197,14 +401,23 @@ export default function Dashboard() {
   const successTone = summary ? (summary.success_rate >= 95 ? "good" : summary.success_rate >= 80 ? "warning" : "critical") : undefined;
   const durationTone = summary?.p90_near_timeout ? "warning" : "good";
   const mcpTone = summary ? (summary.mcp_process_count > 1 ? "warning" : "good") : undefined;
+  const fpTone = summary ? (summary.fp_rate <= 5 ? "good" : summary.fp_rate <= 15 ? "warning" : "critical") : undefined;
+  const toneColor = { good: COLOR.good, warning: COLOR.warning, critical: COLOR.critical } as const;
 
   return (
     <div style={{ minHeight: "100vh", background: COLOR.page, color: COLOR.ink, fontFamily: "system-ui, -apple-system, 'Segoe UI', sans-serif" }}>
       <div style={{ maxWidth: 1100, margin: "0 auto", padding: "28px 20px 60px" }}>
-        <header style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 22 }}>
+        <header className="header-row" style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 22 }}>
           <div>
-            <h1 style={{ fontSize: 20, fontWeight: 700, margin: 0 }}>Vuln Hunter Operations Center</h1>
-            <p style={{ fontSize: 12, color: COLOR.inkMuted, margin: "4px 0 0" }}>
+            <h1 style={{ fontSize: 30, fontWeight: 800, letterSpacing: "-0.02em", margin: 0, textTransform: "uppercase" }}>
+              Vuln Hunter <span style={{ color: COLOR.seqBlue }}>Operations Center</span>
+            </h1>
+            <p style={{ fontSize: 12, color: COLOR.inkMuted, margin: "6px 0 0", display: "flex", alignItems: "center", gap: 6 }}>
+              <motion.span
+                animate={{ opacity: [1, 0.3, 1] }}
+                transition={{ duration: 1.6, repeat: Infinity }}
+                style={{ width: 6, height: 6, borderRadius: "50%", background: connError ? COLOR.critical : COLOR.good, display: "inline-block" }}
+              />
               Live scan telemetry — last {summary?.window_hours ?? 24}h
             </p>
           </div>
@@ -215,24 +428,37 @@ export default function Dashboard() {
           )}
         </header>
 
+        <div className="gauge-row" style={{ display: "flex", flexWrap: "wrap", gap: 12, marginBottom: 12, alignItems: "stretch" }}>
+          <RadialGauge
+            label="Success rate"
+            value={summary?.success_rate ?? 0}
+            max={100}
+            displayValue={summary ? `${summary.success_rate}%` : "--"}
+            sub={summary ? `${summary.completed} ok / ${summary.hung} hung / ${summary.crashed} crashed` : ""}
+            color={successTone ? toneColor[successTone] : COLOR.inkMuted}
+          />
+          <ScanUrlBox />
+          <RadialGauge
+            label="False-positive rate"
+            value={summary?.fp_rate ?? 0}
+            max={100}
+            displayValue={summary ? `${summary.fp_rate}%` : "--"}
+            sub={summary && summary.silent_zero_scanners.length > 0 ? `silent-zero: ${summary.silent_zero_scanners.join(", ")}` : "no silent-zero scanners"}
+            color={fpTone ? toneColor[fpTone] : COLOR.inkMuted}
+          />
+        </div>
+
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12, marginBottom: 20 }}>
           <StatTile
-            label="Success rate"
-            value={summary ? `${summary.success_rate}%` : "--"}
-            sub={summary ? `${summary.completed} ok / ${summary.hung} hung / ${summary.crashed} crashed` : ""}
-            tone={successTone}
+            label="Total scans"
+            value={summary ? String(summary.total_scans) : "--"}
+            sub={`last ${summary?.window_hours ?? 24}h`}
           />
           <StatTile
             label="Duration p50 / p90"
             value={summary ? `${summary.p50_duration_sec}s / ${summary.p90_duration_sec}s` : "--"}
             sub={summary?.p90_near_timeout ? "p90 near 30min timeout" : "within budget"}
             tone={durationTone}
-          />
-          <StatTile
-            label="False-positive rate"
-            value={summary ? `${summary.fp_rate}%` : "--"}
-            sub={summary && summary.silent_zero_scanners.length > 0 ? `silent-zero: ${summary.silent_zero_scanners.join(", ")}` : "no silent-zero scanners"}
-            tone={summary && summary.silent_zero_scanners.length > 0 ? "warning" : "good"}
           />
           <StatTile
             label="MCP processes"
@@ -332,6 +558,18 @@ export default function Dashboard() {
           </div>
         </div>
       </div>
+      <style jsx>{`
+        @media (max-width: 640px) {
+          .header-row {
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+          }
+          .gauge-row {
+            justify-content: center;
+          }
+        }
+      `}</style>
     </div>
   );
 }
