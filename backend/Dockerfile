@@ -11,7 +11,20 @@ RUN curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/
 
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# requirements.txt intentionally pins click/rich past what semgrep's own
+# metadata declares (a verified-working CVE-fix override -- see BUILDLOG).
+# A single `pip install -r requirements.txt` re-resolves the whole file
+# atomically and fails: pip won't accept a constraint semgrep's own
+# metadata says it doesn't support, even though it works fine at runtime.
+# Install semgrep ALONE first so its real dependency tree (not just
+# click/rich) resolves fully and correctly with nothing else present to
+# conflict with. Then install everything else (semgrep excluded) --
+# click/rich get bumped to the pinned override versions in place; none of
+# semgrep's other already-installed dependencies get touched, since pip's
+# default upgrade strategy only re-resolves packages a later spec names.
+RUN pip install --no-cache-dir "semgrep>=1.90.0" \
+    && grep -v '^semgrep' requirements.txt > requirements-rest.txt \
+    && pip install --no-cache-dir -r requirements-rest.txt
 
 COPY . .
 
