@@ -5,6 +5,11 @@
 
 AI-assisted security code reviewer, built on a hybrid architecture: **Semgrep does detection, Claude does triage.** Claude never invents a finding Semgrep didn't already flag.
 
+## Live Demo
+
+- **[Scan a public repo](https://frontend-beta-eight-46.vercel.app)** — password-gated, drop in a GitHub URL
+- **[Operations Center dashboard](https://frontend-beta-eight-46.vercel.app/dashboard)** — live scan telemetry, gauges, event log
+
 ---
 
 ## Why hybrid, not pure-LLM

@@ -108,6 +108,12 @@ export default function Home() {
           Real static analysis (Semgrep) for detection, Claude for triage and fixes —
           not a freeform AI vulnerability guess.
         </p>
+        <a
+          href="/dashboard"
+          className="mt-2 inline-block text-sm font-bold text-blue-600 underline underline-offset-2 hover:text-blue-800"
+        >
+          View live scan dashboard →
+        </a>
       </header>
 
       <div className="mb-4 flex gap-2 border-b border-black/10 pb-4">
