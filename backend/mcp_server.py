@@ -96,10 +96,22 @@ async def scan_repo(repo_path: str, ctx: Context) -> str:
     # keeps the event loop free so the server stays alive and report_progress can
     # actually get out.
     scan_id = telemetry.start_scan(repo_path, tool="mcp:scan_repo")
+    total_scanners = len(all_scanners.FULL_SCAN_SCANNERS)
+
+    def _on_progress(scanner_name: str, step: int, total: int) -> None:
+        # Runs on the anyio worker thread (see run_full_scan's call below), not
+        # the event loop -- telemetry.report_progress is a plain sync DB write,
+        # safe to call directly; ctx.report_progress is async and belongs to
+        # the event loop, so it has to hop back via anyio.from_thread.run.
+        telemetry.report_progress(scan_id, step, total, scanner_name)
+        anyio.from_thread.run(ctx.report_progress, step, total, f"{scanner_name} done ({step}/{total})")
+
     try:
         with _stall_watchdog():
-            await ctx.report_progress(0, 1, "running semgrep + gitleaks + pip-audit + trivy...")
-            findings = await anyio.to_thread.run_sync(functools.partial(all_scanners.run_full_scan, str(target)))
+            await ctx.report_progress(0, total_scanners, "running semgrep + gitleaks + pip-audit + trivy...")
+            findings = await anyio.to_thread.run_sync(
+                functools.partial(all_scanners.run_full_scan, str(target), on_progress=_on_progress)
+            )
     except Exception as e:
         # A hard process crash/kill never reaches this except -- that's what
         # telemetry.reconcile_stale() catches reactively on the next dashboard
@@ -109,7 +121,7 @@ async def scan_repo(repo_path: str, ctx: Context) -> str:
         raise
 
     telemetry.record_scan_results(scan_id, all_scanners.FULL_SCAN_SCANNERS, findings)
-    await ctx.report_progress(1, 1, "done")
+    await ctx.report_progress(total_scanners, total_scanners, "done")
     kept, ignored_count = _finalize(repo_path, findings)
     telemetry.complete_scan(scan_id, status="COMPLETED")
     return _format_findings(kept, ignored_count)

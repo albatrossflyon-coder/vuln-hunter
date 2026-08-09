@@ -30,6 +30,16 @@ type RepoStaleness = {
   last_status: string;
 };
 
+type ActiveScan = {
+  scan_id: string;
+  repo_path: string;
+  tool: string;
+  elapsed_sec: number;
+  progress_step: number;
+  progress_total: number;
+  current_scanner: string | null;
+};
+
 type EventLog = {
   event_id: number;
   scan_id: string | null;
@@ -365,25 +375,62 @@ function ScanUrlBox() {
   );
 }
 
+function ActiveScanBar({ scan }: { scan: ActiveScan }) {
+  const pct = scan.progress_total > 0 ? Math.round((scan.progress_step / scan.progress_total) * 100) : 0;
+  return (
+    <motion.div
+      layout
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0 }}
+      style={{
+        background: COLOR.surface,
+        border: `1px solid ${COLOR.seqBlue}55`,
+        borderRadius: 10,
+        padding: "12px 16px",
+        marginBottom: 8,
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 6 }}>
+        <span style={{ fontFamily: "monospace", color: COLOR.inkSecondary }}>{scan.repo_path}</span>
+        <span style={{ color: COLOR.inkMuted }}>
+          {scan.current_scanner ? `${scan.current_scanner}…` : "starting…"} ({scan.progress_step}/{scan.progress_total || "?"}) — {Math.round(scan.elapsed_sec)}s
+        </span>
+      </div>
+      <div style={{ background: COLOR.page, borderRadius: 4, height: 8, overflow: "hidden" }}>
+        <motion.div
+          initial={{ width: 0 }}
+          animate={{ width: `${pct}%` }}
+          transition={{ duration: 0.4, ease: "easeOut" }}
+          style={{ height: "100%", background: COLOR.seqBlue }}
+        />
+      </div>
+    </motion.div>
+  );
+}
+
 export default function Dashboard() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [repos, setRepos] = useState<RepoStaleness[]>([]);
   const [events, setEvents] = useState<EventLog[]>([]);
+  const [activeScans, setActiveScans] = useState<ActiveScan[]>([]);
   const [connError, setConnError] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     async function poll() {
       try {
-        const [s, r, e] = await Promise.all([
+        const [s, r, e, a] = await Promise.all([
           fetch(`${API_URL}/telemetry/summary`).then((res) => res.json()),
           fetch(`${API_URL}/telemetry/repos`).then((res) => res.json()),
           fetch(`${API_URL}/telemetry/events?limit=25`).then((res) => res.json()),
+          fetch(`${API_URL}/telemetry/active`).then((res) => res.json()),
         ]);
         if (!cancelled) {
           setSummary(s);
           setRepos(r);
           setEvents(e);
+          setActiveScans(a);
           setConnError(false);
         }
       } catch {
@@ -427,6 +474,16 @@ export default function Dashboard() {
             </span>
           )}
         </header>
+
+        {activeScans.length > 0 && (
+          <div style={{ marginBottom: 12 }}>
+            <AnimatePresence initial={false}>
+              {activeScans.map((s) => (
+                <ActiveScanBar key={s.scan_id} scan={s} />
+              ))}
+            </AnimatePresence>
+          </div>
+        )}
 
         <div className="gauge-row" style={{ display: "flex", flexWrap: "wrap", gap: 12, marginBottom: 12, alignItems: "stretch" }}>
           <RadialGauge

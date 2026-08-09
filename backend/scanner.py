@@ -52,13 +52,20 @@ def get_changed_files(repo_path: str, base_ref: str = "HEAD") -> List[str]:
     never-`git add`ed files are invisible to it by design. Since "scan what I'm
     about to commit" is the main use case, untracked files are unioned in too.
     """
+    # stdin=DEVNULL on every call here: same fix as scanner.py's semgrep call
+    # (see run_scan below) -- a subprocess spawned from mcp_server.py inherits
+    # the MCP server's own stdin (the JSON-RPC pipe to Claude Code), which
+    # never sees EOF for the life of the session, and communicate() hangs
+    # waiting on it. get_changed_files is scan_diff's only caller and was the
+    # one subprocess site in this codebase that never got this fix -- caught
+    # live via diagnose_hang.ps1 showing the hang inside this exact function.
     diff_cmd = ["git", "-C", repo_path, "diff", "--name-only", "--diff-filter=ACMR", base_ref]
-    diff_result = subprocess.run(diff_cmd, capture_output=True, text=True, timeout=30)
+    diff_result = subprocess.run(diff_cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
     if diff_result.returncode != 0:
         raise RuntimeError(f"git diff failed (is this a git repo? is '{base_ref}' a valid ref?): {diff_result.stderr[:500]}")
 
     untracked_cmd = ["git", "-C", repo_path, "ls-files", "--others", "--exclude-standard"]
-    untracked_result = subprocess.run(untracked_cmd, capture_output=True, text=True, timeout=30)
+    untracked_result = subprocess.run(untracked_cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
 
     relative_paths = set(diff_result.stdout.splitlines()) | set(untracked_result.stdout.splitlines())
 
@@ -67,7 +74,7 @@ def get_changed_files(repo_path: str, base_ref: str = "HEAD") -> List[str]:
     # Without this, that case silently looks identical to "nothing to scan".
     if base_ref == "HEAD" and not relative_paths:
         prev_commit_cmd = ["git", "-C", repo_path, "diff", "--name-only", "--diff-filter=ACMR", "HEAD~1"]
-        prev_commit_result = subprocess.run(prev_commit_cmd, capture_output=True, text=True, timeout=30)
+        prev_commit_result = subprocess.run(prev_commit_cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
         if prev_commit_result.returncode == 0:
             relative_paths = set(prev_commit_result.stdout.splitlines())
 

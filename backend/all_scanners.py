@@ -14,7 +14,7 @@ pick it up.
 """
 
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 import business_logic
 from dep_scan import run_pip_audit_scan
@@ -22,6 +22,8 @@ from gitleaks import run_gitleaks_scan
 from scanner import run_scan
 from trivy_scan import TRIVY_LOCKFILE_NAMES, run_trivy_scan
 from triage import triage_all
+
+OnProgress = Callable[[str, int, int], None]
 
 
 FULL_SCAN_SCANNERS = ["semgrep", "gitleaks", "pip-audit", "trivy"]
@@ -41,14 +43,32 @@ def diff_scanners_invoked(changed_files: List[str]) -> List[str]:
     return scanners
 
 
-def run_full_scan(repo_path: str) -> List[Dict[str, Any]]:
+def run_full_scan(repo_path: str, on_progress: Optional[OnProgress] = None) -> List[Dict[str, Any]]:
     """Everything, for a first pass on a whole repo: semgrep+Claude-triage
     (rule_confirmed/ai_reasoning) plus the deterministic scanners (gitleaks
-    secrets, pip-audit + trivy dependency CVEs) that skip triage entirely."""
+    secrets, pip-audit + trivy dependency CVEs) that skip triage entirely.
+
+    on_progress(scanner_name, step, total), called after each scanner
+    finishes -- optional so callers that don't care about progress (main.py's
+    REST route, existing tests) don't have to pass anything."""
+    total = len(FULL_SCAN_SCANNERS)
+
+    def _report(scanner_name: str, step: int) -> None:
+        if on_progress:
+            on_progress(scanner_name, step, total)
+
     findings = triage_all(run_scan(repo_path))
+    _report("semgrep", 1)
+
     findings += run_gitleaks_scan(repo_path)
+    _report("gitleaks", 2)
+
     findings += run_pip_audit_scan(repo_path)
+    _report("pip-audit", 3)
+
     findings += run_trivy_scan(repo_path)
+    _report("trivy", 4)
+
     return findings
 
 

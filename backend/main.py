@@ -59,6 +59,22 @@ class DiffScanRequest(BaseModel):
     deep_review: bool = False
 
 
+class TelemetryIngestEvent(BaseModel):
+    """Mirrors a local-machine scan's telemetry.py events here, so the hosted
+    dashboard shows MCP scan_repo/scan_diff activity too, not just requests
+    that hit this backend's own /scan/url. See telemetry.py's _push_remote."""
+
+    kind: str  # "scan_start" | "scan_progress" | "scan_end"
+    scan_id: str
+    repo_path: str | None = None
+    tool: str | None = None
+    step: int | None = None
+    total: int | None = None
+    scanner: str | None = None
+    status: str | None = None
+    error_reason: str | None = None
+
+
 class Finding(BaseModel):
     rule_id: str
     path: str
@@ -265,6 +281,30 @@ async def telemetry_repos():
 @app.get("/telemetry/events")
 async def telemetry_events(limit: int = 30):
     return telemetry.get_recent_events(limit=limit)
+
+
+@app.get("/telemetry/active")
+async def telemetry_active():
+    return telemetry.get_active_scans()
+
+
+@app.post("/telemetry/ingest", dependencies=[Depends(require_scan_key)])
+async def telemetry_ingest(event: TelemetryIngestEvent):
+    """Write side of the mirror -- gated behind the same SCAN_API_KEY as the
+    scan-triggering endpoints, since this writes into the telemetry store
+    unauthenticated /telemetry/* reads are not allowed to."""
+    # _push=False on every branch: this handler is the terminal end of the
+    # mirror. Without it, receiving a push re-triggers another push, forever
+    # -- see telemetry.py's start_scan docstring for how that was caught.
+    if event.kind == "scan_start":
+        telemetry.start_scan(event.repo_path or "", event.tool or "unknown", scan_id=event.scan_id, _push=False)
+    elif event.kind == "scan_progress":
+        telemetry.report_progress(event.scan_id, event.step or 0, event.total or 0, event.scanner or "", _push=False)
+    elif event.kind == "scan_end":
+        telemetry.complete_scan(event.scan_id, status=event.status or "COMPLETED", error_reason=event.error_reason, _push=False)
+    else:
+        raise HTTPException(status_code=422, detail=f"unknown event kind: {event.kind}")
+    return {"status": "ok"}
 
 
 if __name__ == "__main__":

@@ -16,9 +16,12 @@ as perpetually "RUNNING".
 """
 
 import json
+import os
 import sqlite3
+import threading
 import time
 import traceback
+import urllib.request
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -36,6 +39,45 @@ JSONL_PATH = Path(__file__).parent / "vuln_hunter_events.jsonl"
 STALL_TIMEOUT_SEC = 1800
 
 SCANNERS = ("semgrep", "gitleaks", "pip-audit", "trivy")
+
+
+def _push_remote(payload: Dict[str, Any]) -> None:
+    """Best-effort mirror of a telemetry event to the deployed Render backend's
+    /telemetry/ingest, so the hosted Operations Center dashboard shows local
+    MCP scan activity too, not just scans that hit the public /scan/url route.
+
+    Unset by default -- only fires when both env vars are set, which they are
+    only on machines that opt in (this one). Fire-and-forget in a background
+    thread with a short timeout: a slow/sleeping Render free-tier instance
+    must never add latency to an actual scan, and a failure here must never
+    surface as a scan failure -- this is a mirror, not part of the scan."""
+    remote_url = os.getenv("TELEMETRY_REMOTE_URL")
+    api_key = os.getenv("SCAN_API_KEY")
+    if not remote_url:
+        return
+    # semgrep: dynamic-urllib-use-detected -- TELEMETRY_REMOTE_URL is operator
+    # config, not user input, but urllib.request does follow file:// unlike
+    # requests -- restrict the scheme so a misconfigured env var can't turn
+    # this into a local-file read instead of a network push.
+    if not remote_url.startswith("https://"):
+        return
+
+    def _send() -> None:
+        try:
+            req = urllib.request.Request(
+                remote_url.rstrip("/") + "/telemetry/ingest",
+                data=json.dumps(payload, default=str).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    **({"X-API-Key": api_key} if api_key else {}),
+                },
+                method="POST",
+            )
+            urllib.request.urlopen(req, timeout=5)
+        except Exception:
+            pass  # ponytail: best-effort mirror, a dead/sleeping remote must never affect the local scan
+
+    threading.Thread(target=_send, daemon=True).start()
 
 
 def scanner_for_rule_id(rule_id: str) -> str:
@@ -74,9 +116,27 @@ def init_db() -> None:
             duration_sec REAL,
             repo_size_bytes INTEGER,
             language_mix TEXT,
-            error_reason TEXT
+            error_reason TEXT,
+            progress_step INTEGER DEFAULT 0,
+            progress_total INTEGER DEFAULT 0,
+            current_scanner TEXT
         );
         """)
+        # CREATE TABLE IF NOT EXISTS doesn't add columns to an existing table
+        # (a DB from before this change). SQLite has no ADD COLUMN IF NOT
+        # EXISTS, so add and swallow the "duplicate column" error instead.
+        # semgrep: sql-injection-string-concat -- these are fixed literals,
+        # not interpolated variables, but a pre-built statement list (instead
+        # of an f-string loop) removes the dynamic-SQL pattern entirely.
+        for stmt in (
+            "ALTER TABLE scans ADD COLUMN progress_step INTEGER DEFAULT 0;",
+            "ALTER TABLE scans ADD COLUMN progress_total INTEGER DEFAULT 0;",
+            "ALTER TABLE scans ADD COLUMN current_scanner TEXT;",
+        ):
+            try:
+                conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass
         conn.execute("""
         CREATE TABLE IF NOT EXISTS scanner_metrics (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -131,20 +191,57 @@ def log_event(
     })
 
 
-def start_scan(repo_path: str, tool: str, repo_size_bytes: int = 0, language_mix: Optional[Dict[str, float]] = None) -> str:
-    scan_id = f"scan-{uuid.uuid4().hex[:8]}"
+def start_scan(
+    repo_path: str,
+    tool: str,
+    repo_size_bytes: int = 0,
+    language_mix: Optional[Dict[str, float]] = None,
+    scan_id: Optional[str] = None,
+    _push: bool = True,
+) -> str:
+    """scan_id is normally generated here. /telemetry/ingest passes the
+    caller's own id instead, so a mirrored scan's start/progress/complete
+    events all land on the same row here as they did on the source machine.
+
+    _push=False is what /telemetry/ingest's handler passes: this function is
+    the terminal end of the mirror, and it reuses these same local-write
+    functions to get there -- without _push=False it would re-push what it
+    just received, forever (caught live: a 6-event test produced 1200+
+    ingest calls before this flag existed)."""
+    scan_id = scan_id or f"scan-{uuid.uuid4().hex[:8]}"
     now = time.time()
     with _connect() as conn:
+        # INSERT OR IGNORE: a caller-supplied scan_id can legitimately repeat
+        # (a retried /telemetry/ingest push after a flaky connection to a
+        # sleeping Render instance) -- a second start for an id that already
+        # exists should be a no-op, not a crash on the scan_id PRIMARY KEY.
         conn.execute(
-            "INSERT INTO scans (scan_id, repo_path, tool, status, start_time, repo_size_bytes, language_mix) "
+            "INSERT OR IGNORE INTO scans (scan_id, repo_path, tool, status, start_time, repo_size_bytes, language_mix) "
             "VALUES (?, ?, ?, 'RUNNING', ?, ?, ?)",
             (scan_id, repo_path, tool, now, repo_size_bytes, json.dumps(language_mix or {})),
         )
     _append_jsonl({"kind": "scan_start", "scan_id": scan_id, "repo_path": repo_path, "tool": tool, "timestamp": now})
+    if _push:
+        _push_remote({"kind": "scan_start", "scan_id": scan_id, "repo_path": repo_path, "tool": tool})
     return scan_id
 
 
-def complete_scan(scan_id: str, status: str = "COMPLETED", error_reason: Optional[str] = None) -> None:
+def report_progress(scan_id: str, step: int, total: int, scanner_name: str, _push: bool = True) -> None:
+    """Called after each scanner in a run finishes -- see all_scanners.py's
+    on_progress callback. Local write is fire-and-forget cheap (one UPDATE);
+    the remote push is what lets the hosted dashboard show it live.
+    _push=False: see start_scan's docstring -- same anti-loop reason."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE scans SET progress_step = ?, progress_total = ?, current_scanner = ? WHERE scan_id = ?",
+            (step, total, scanner_name, scan_id),
+        )
+    if _push:
+        _push_remote({"kind": "scan_progress", "scan_id": scan_id, "step": step, "total": total, "scanner": scanner_name})
+
+
+def complete_scan(scan_id: str, status: str = "COMPLETED", error_reason: Optional[str] = None, _push: bool = True) -> None:
+    """_push=False: see start_scan's docstring -- same anti-loop reason."""
     now = time.time()
     with _connect() as conn:
         row = conn.execute("SELECT start_time FROM scans WHERE scan_id = ?", (scan_id,)).fetchone()
@@ -155,6 +252,8 @@ def complete_scan(scan_id: str, status: str = "COMPLETED", error_reason: Optiona
         )
     _append_jsonl({"kind": "scan_end", "scan_id": scan_id, "status": status, "error_reason": error_reason, "timestamp": now})
     log_event("INFO" if status == "COMPLETED" else "ERROR", "orchestrator", f"scan {status}: {error_reason or 'ok'}", scan_id=scan_id)
+    if _push:
+        _push_remote({"kind": "scan_end", "scan_id": scan_id, "status": status, "error_reason": error_reason})
 
 
 def log_stopper_bug(scan_id: str, component: str, message: str, exc: Optional[BaseException] = None) -> None:
@@ -297,6 +396,31 @@ def get_telemetry_summary(hours: int = 24) -> Dict[str, Any]:
         "stopper_bugs_count": bugs,
         "mcp_process_count": len(list_mcp_pids()),
     }
+
+
+def get_active_scans() -> List[Dict[str, Any]]:
+    """Currently-RUNNING scans with progress, for the dashboard's live
+    progress bar. reconcile_stale() first so a hung/dead scan doesn't show
+    as perpetually "in progress"."""
+    reconcile_stale()
+    now = time.time()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT scan_id, repo_path, tool, start_time, progress_step, progress_total, current_scanner "
+            "FROM scans WHERE status = 'RUNNING' ORDER BY start_time DESC"
+        ).fetchall()
+    return [
+        {
+            "scan_id": r["scan_id"],
+            "repo_path": r["repo_path"],
+            "tool": r["tool"],
+            "elapsed_sec": round(now - r["start_time"], 1),
+            "progress_step": r["progress_step"] or 0,
+            "progress_total": r["progress_total"] or 0,
+            "current_scanner": r["current_scanner"],
+        }
+        for r in rows
+    ]
 
 
 def get_repo_staleness() -> List[Dict[str, Any]]:
