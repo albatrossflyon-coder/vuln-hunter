@@ -3,8 +3,9 @@
 **Repo**: C:\Repos\vuln-hunter | github.com/albatrossflyon-coder/vuln-hunter (public)
 
 AI-assisted security code reviewer. Hybrid architecture: real static analysis
-(Semgrep) for ground-truth vulnerability detection, Claude for triage,
-exploitability assessment, and fix suggestions.
+(Semgrep) for ground-truth vulnerability detection, an LLM (currently Groq /
+Llama 3.3 70B, see 2026-08-10 entry) for triage, exploitability assessment,
+and fix suggestions.
 
 **Rule: Update this file every time a file is added, changed, or a feature ships.**
 
@@ -15,12 +16,34 @@ exploitability assessment, and fix suggestions.
 Asking an LLM to freely hunt for vulnerabilities produces too many false
 positives/negatives to be credible — that's the classic failure mode of "AI
 security tools." Instead: Semgrep (a real, widely-used static analysis engine)
-does detection against known rule patterns — that's the ground truth. Claude's
-job is strictly downstream of that: explain *why* a specific matched finding is
-risky in context, rate exploitability, and suggest a concrete fix. Claude never
-invents a finding that Semgrep didn't already flag.
+does detection against known rule patterns — that's the ground truth. The
+LLM's job is strictly downstream of that: explain *why* a specific matched
+finding is risky in context, rate exploitability, and suggest a concrete fix.
+It never invents a finding that Semgrep didn't already flag.
 
 ## Changelog
+
+### 2026-08-10 — Triage/business-logic layer moved off Anthropic (out of credits) onto Groq; two real regressions caught and fixed by testing before ship
+
+`ANTHROPIC_API_KEY` ran out of credits (same key exhaustion that hit job-hunter 2026-08-09), breaking both `triage.py` and `business_logic.py`. Swapped both from the `anthropic` SDK to Groq's free OpenAI-compatible endpoint (`llama-3.3-70b-versatile`) — a separate quota from job-hunter's NVIDIA NIM fix, chosen after independently verifying Groq's real free-tier limits (30 RPM / 1,000 RPD / 12K TPM, confirmed directly against Groq's docs after cross-checking multiple AI-brainstormer estimates, one of which overstated the daily limit by 14x) and finding a working `GROQ_API_KEY` already provisioned locally for the `/watch` skill's Whisper fallback — zero new signup needed.
+
+**Real bug #1, caught by testing on a full cloned repo, not a synthetic example:** 5 concurrent triage workers blew through Groq's 12K TPM ceiling mid-scan (`openai.RateLimitError`), a limit Anthropic's plan never got close to at the same concurrency. Fixed with a shared `_call_with_retry` backoff helper (`triage.py`) and dropped `MAX_CONCURRENT_TRIAGE`/`MAX_CONCURRENT_REVIEWS` from 5 to 3. Reverified: two full re-scans of the same repo, clean both times.
+
+**Real bug #2, caught by the project's own regression suite (`test_business_logic_manual.py`), not the ad hoc tests run first:** Llama 3.3 70B produced 2 false-positive findings on code that should return zero — traced to a genuine ambiguity in `business_logic.py`'s `SYSTEM_PROMPT`: rule 2 said to "say [uncertainty] explicitly," which Claude apparently read as "note internally, don't emit a finding" but Llama read literally as "output a finding that says you're uncertain." Rewrote rules 2-4 to make "uncertainty is never itself a finding" unambiguous regardless of which model is reading it. Reverified: regression suite passed 4/4 runs after the fix (including the true-positive IDOR case, so this didn't just suppress everything), plus two more full-repo re-scans stayed clean.
+
+**Verification, not just one pass:** semgrep on the diff (0 findings), the project's real `test_business_logic_manual.py` and `test_pipeline_manual.py` suites, 4 full scans total of a real external repo (`ShenSeanChen/waku-agent`) across both bugs and both fixes.
+
+### 2026-08-08 7:56 PM CDT — Local scans now phone home to the hosted dashboard, with live per-scanner progress; commit `308f0a2`, pushed and confirmed on origin/master
+
+Closed the gap where local `scan_repo`/`scan_diff` calls (Claude Code MCP) wrote telemetry to a local-only SQLite file the hosted Operations Center dashboard could never see. `telemetry.py`'s `start_scan`/`report_progress`/`complete_scan` now mirror events to the deployed backend's new `POST /telemetry/ingest` (HTTPS-only, gated behind `SCAN_API_KEY`), and `all_scanners.run_full_scan` gained an `on_progress` callback so the dashboard can show real per-scanner progress (semgrep → gitleaks → pip-audit → trivy) via a new `GET /telemetry/active` endpoint and a live progress bar on the frontend, instead of only a 0/1 start/done state.
+
+**Real bug caught by testing, not shipped:** the ingest handler reused the same telemetry write functions a normal scan calls — which themselves push remotely — so receiving a mirrored event re-triggered another push, forever. A 6-event local test produced 1200+ requests before this was caught. Fixed with a `_push: bool` flag threaded through all three write functions; the ingest handler is the one caller that sets it `False`. Reverified: the same 6-event test now produces exactly 6 requests, and a scan deliberately left mid-run showed real live progress (`2/4, gitleaks`) via `/telemetry/active`.
+
+**Unrelated real bug found and fixed in the same pass**, while a `scan_diff` security-scan-on-this-diff was hanging: `get_changed_files` (scan_diff's only caller) was the one subprocess site in `scanner.py` that never got the `stdin=DEVNULL` fix already applied everywhere else for the Windows MCP-stdin-inheritance hang (see 2026-08-05 entry below). Confirmed via `diagnose_hang.ps1`'s thread trace showing the hang inside that exact function, fixed, reverified by re-running `scan_diff` successfully afterward.
+
+**2 real findings from vuln-hunter's own scan of this diff, both fixed and reverified:** `TELEMETRY_REMOTE_URL` is now restricted to `https://` before use (closes a `file://` SSRF-style path through `urllib.request`; verified directly — an `https://` URL reaches `urlopen`, `http://` and `file://` both get rejected before it). The `ALTER TABLE` column-migration loop now uses a pre-built statement list instead of an f-string, removing the dynamic-SQL pattern semgrep flagged (values were always fixed literals, not user input, but the pattern itself is gone now).
+
+**Not touched, deliberately:** 5 other findings from the same scan live in `vuln-hunter\vuln-hunter\backend\test_sample\vulnerable.py` — the stray nested duplicate-repo folder flagged in the 2026-08-06 entry below as "untracked, not touched." Those are intentional planted-vulnerability test fixtures, not real code, and not part of this change.
 
 ### 2026-08-06 — Dashboard gauges, live URL-scan box, and real deploy to Vercel + Render
 
@@ -450,6 +473,58 @@ Live at `https://frontend-beta-eight-46.vercel.app` (Vercel) + `https://vuln-hun
 2. **Cost-tiering for the triage LLM never got built** — free tier still uses the same Claude call as everything else, since public access is gated rather than open. Only becomes relevant if the scope ever changes to open public access.
 3. **Not linked from the GitHub profile/README yet** — deploy is live but not yet publicized.
 4. GitHub profile "watch it scan live" theatrical demo effect — a separate, bigger piece, explicitly deferred by Chris, not started.
+
+### Future: trufflehog as a verified-secrets pass alongside gitleaks — candidate only, not started
+
+Discovered 2026-08-09 already installed on this machine (`C:\tools\trufflehog\trufflehog.exe`, v3.95.9) but never wired into vuln-hunter's scanner suite — confirmed via `all_scanners.py`, `FULL_SCAN_SCANNERS` only lists `["semgrep", "gitleaks", "pip-audit", "trivy"]`, no trufflehog reference anywhere in the codebase. Real, actively maintained (27k+ stars, pushed hours before this check), official trufflesecurity project.
+
+**Why it's worth adding, not just a duplicate of gitleaks:** trufflehog's `--results=verified` mode actually tests a found credential against the real provider API (confirms an AWS key is genuinely live, returns account ID/ARN/user ID) rather than pattern-matching like gitleaks. Directly relevant to real friction hit twice today (2026-08-09, Octop and Anthropic-Cybersecurity-Skills evaluations): several gitleaks "high exploitability" secret findings turned out to be a documented public signing constant and JWT/AWS-key placeholder examples, each needing a manual file read to rule out. A verified-secrets pass would auto-resolve cases like those — confirmed-live escalates hard, unverified deprioritizes — cutting manual triage on every future scan's secret findings.
+
+**Proposed shape, not decided:** complementary to gitleaks, not a replacement — gitleaks still catches broad patterns trufflehog might miss; trufflehog's verification becomes an automatic triage layer on top of gitleaks' hits, not a separate full scanner pass.
+
+### Future: TOON-encode scan output — candidate only, not started, broader than just vuln-hunter
+
+2026-08-09: `toon-format/toon` (MIT, 25k★, scan clean — zero findings) evaluated as a token-savings candidate for `claude-token-operator-kit`. It's a compact encoding of the **JSON data model** specifically — not a general text compressor, so it only applies where a pipeline already emits structured JSON, not free-form text (e.g. the repo-update-automation mailbox's raw CHANGELOG diffs get no benefit from it).
+
+**Why vuln-hunter is the concrete first target, not the only one:** hard evidence from today — `scan_repo` returned 62,970 raw characters for Octop and 316,079 for Anthropic-Cybersecurity-Skills, both requiring the harness's auto-save-to-file fallback and a subagent delegation just to keep them out of context. That's vuln-hunter's own output format (`backend/mcp_server.py`, `backend/main.py`), fully ours to change.
+
+**Broader scope, each needs individual wiring — not a blanket switch:**
+- **vuln-hunter's scan output — ours, lowest-risk.** Read-only report data, no downstream consumer depends on the exact format. The clear first integration point.
+- **job-hunter's `pipeline_log.jsonl`, career-ops's `remote_ratio_snapshots.json`/`source_progress.json` — ours, higher-risk.** These aren't just reporting output — job-hunter's own Python pipeline reads them back programmatically, so changing format touches real automation logic, not just a report layer. Separate piece of work, needs its own testing, don't conflate with the vuln-hunter change.
+- **GitHub API, Supabase API, the harness's own oversized-response auto-save mechanism — NOT ours to wire.** These are external wire formats we don't control; TOON doesn't apply there. The only lever on that side is querying more narrowly, not re-encoding.
+
+**Decision:** documenting now so it isn't lost, not implementing tonight — this is real engineering work (output-format change + verification that nothing downstream breaks) better suited to a dedicated session than tacked onto an already-long one. When it happens, start with vuln-hunter's scan output specifically, since it's ours, lowest-risk, and has hard numbers already proving the need.
+
+### Future: scanner-stack architecture review (Zizmor/Checkov/Scorecard/Syft/OSV-Scanner) + finding-dedup layer — candidate only, not started
+
+2026-08-09: ran a structured architecture-review brief (not a "what tools should we add" shopping-list ask) past two independent AI brainstormers, then verified every claimed tool against live GitHub metadata (license/stars/last-push) before trusting either summary. Findings below are what survived verification.
+
+**Verified real, correctly licensed, actively maintained (all pushed within days of the check):**
+- **Zizmor** (`woodruffw/zizmor`, MIT, 5,998★) — GitHub Actions workflow security: dangerous permissions, credential persistence, template injection, suspicious refs. Genuinely new territory — none of the current four scanners look at `.github/workflows/` at all.
+- **Checkov** (`bridgecrewio/checkov`, Apache-2.0, 8,922★) — IaC/cloud config scanner (Terraform, K8s, CloudFormation, Dockerfiles). Same story: genuinely new coverage, zero overlap with semgrep/gitleaks/pip-audit/trivy.
+- **OpenSSF Scorecard** (`ossf/scorecard`, Apache-2.0, 5,624★) — repo security-posture scoring (branch protection, review requirements, CI practices), not a traditional vuln scanner. **Caveat neither brainstormer stated clearly:** most checks query the GitHub API directly (needs a `GITHUB_TOKEN`), so it's not purely local the way semgrep/gitleaks are — fine given vuln-hunter always scans GitHub-hosted repos, but worth knowing before assuming it's a drop-in local scanner.
+- **Syft** (`anchore/syft`, Apache-2.0, 9,367★) — SBOM generation (CycloneDX/SPDX). Pure inventory, no false-positive risk, useful groundwork even before any dedup layer exists.
+- **OSV-Scanner** (`google/osv-scanner`, Apache-2.0, 10,792★) — both brainstormers independently landed on "benchmark against Trivy/pip-audit before adding, don't blindly stack it on" — that's a real signal worth trusting since it wasn't prompted.
+- **OWASP ZAP** — correctly scoped by both as a future-phase DAST addition, not part of the base repo scan (needs a live running target, same authorization boundary as the dalfox candidate above).
+
+**License note:** ShellCheck and Hadolint (mentioned by the second brainstormer) are both **GPL-3.0**, not MIT/Apache like the rest of this list. Still fine to shell out to as an external subprocess, but a different license category worth tracking if vuln-hunter's own docs ever need to account for what it bundles vs. invokes.
+
+**Correction, same day: the "Muninn" claim below was wrongly flagged as fabricated — it's real.** The first brainstormer cited "Muninn," an existing open-source stack combining Gitleaks+Semgrep+Zizmor+actionlint+poutine+OSV-Scanner+Trivy+Checkov with cross-scanner dedup, as external validation. Initial broad `gh search repos "muninn"` came back with only unrelated noise, wrongly read as "doesn't exist." Re-verified via direct `gh api repos/SkaldLab/Muninn` (exact path, not search) and its actual README: real project, matches the citation exactly — all 8 scanners, cross-scanner dedup by advisory ID, GitHub Action with SARIF/JSON/PR-comment output, AGPL v3, actively maintained. The brainstormer's "Muninn" citation was valid prior art after all — the Zizmor/Checkov/dedup-layer recommendations were independently well-founded either way, but this specific citation should be treated as confirmed real, not disputed.
+
+**The priority call, not just another scanner:** cross-scanner finding correlation/deduplication matters more than adding tools. Hit this exact friction twice on 2026-08-09 (Octop and Anthropic-Cybersecurity-Skills scans both needed manual triage to rule out false-positive secret findings). A dedup/aggregation layer makes every existing scanner more useful; another scanner without one just means more noise to manually sort.
+
+**Nothing decided or built.** Chris's explicit instruction: bring recommendations back for comparison, don't implement yet.
+
+### Future: dalfox as an optional DAST scan mode — candidate only, not started
+
+Cloned `hahwul/dalfox` to `C:\Repos\dalfox` (2026-08-08) as a real candidate for a future capability, not a decision to build it. Dalfox is a DAST XSS scanner (Rust, official releases, real project) — sends actual test payloads at a *live* URL and checks for reflected/stored/DOM-based XSS. Fundamentally different from everything vuln-hunter currently does: Semgrep/gitleaks/pip-audit/trivy are all static (read source, no running app needed); dalfox needs a live target and is the one class of bug (context-dependent runtime XSS) static analysis structurally can't reliably catch. The idea, if pursued: an optional dynamic-scan mode for any live URL vuln-hunter is given, alongside the existing static scanners — SAST+DAST together is a materially stronger security-tool story than SAST alone. Real caution that isn't hypothetical: DAST sends actual exploit-attempt payloads, so it's only ever appropriate against Chris's own sites or something explicitly authorized — same boundary vuln-hunter's static scanners don't need to worry about but this would.
+
+### Dashboard: repo names + per-repo findings — deferred 2026-08-08, not started
+
+Chris flagged live, using the real dashboard against real scans (dalfox, testsprite-cli, brainoutside): two real usability gaps, explicitly deferred to a future session, not tonight.
+
+1. **Repo staleness shows meaningless temp paths.** `main.py`'s `/scan/url` clones to `tempfile.mkdtemp(prefix="vuln-hunter-scan-")` and records *that* as the repo identity in telemetry — `/tmp/vuln-hunter-scan-xqr4dar1` instead of `github.com/hahwul/dalfox`, even though the handler has the real URL right there. Small, real fix: pass the actual URL through to `telemetry.start_scan` instead of the temp path.
+2. **Findings are only ever shown as a global 24h rolling aggregate** (the gauges, the scanner bar chart) — there's no way to see "what did dalfox specifically find" separate from every other repo scanned that day. Bigger, real feature: a per-scan/per-repo findings view, not just a global rollup. Needs a new endpoint (findings scoped to one `scan_id`) plus UI to select/view it.
 
 ### Other pending
 - [ ] `mcp_process_count` read 2 live during dashboard testing (2026-08-04) — corroborates the unconfirmed "6 simultaneous processes" lead from the same night's earlier crash investigation; now has a real-time indicator instead of a one-off observation

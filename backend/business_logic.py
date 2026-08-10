@@ -17,13 +17,14 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List
 
-import anthropic
+from triage import TRIAGE_MODEL, _call_with_retry, _llm_client
 
-# Bounded concurrency, same reasoning as triage.py's MAX_CONCURRENT_TRIAGE:
+# Bounded concurrency, same reasoning as triage.py's MAX_CONCURRENT_TRIAGE
+# (including the 5 -> 3 drop after the Groq TPM ceiling was hit 2026-08-10):
 # review_files used to call review_file() one file at a time -- on a diff
 # with many changed files that was pure serial API latency with no progress
 # feedback, easily adding up to hours and looking exactly like a hang.
-MAX_CONCURRENT_REVIEWS = 5
+MAX_CONCURRENT_REVIEWS = 3
 
 SYSTEM_PROMPT = """You are doing a business-logic / access-control security \
 review of ONE file, as a second pass that complements automated pattern-based \
@@ -43,19 +44,28 @@ CRITICAL RULES -- breaking any of these makes your output useless:
 1. Only flag something you can ground in code ACTUALLY PRESENT in the file below.
    Quote the exact lines. Do not describe a concern without a quote.
 2. If the authorization check might happen elsewhere (middleware, a decorator, \
-   a base class you can't see the body of), say that explicitly as uncertainty \
-   -- do NOT assume it's missing just because you can't see it.
-3. If you find nothing you're prepared to ground in a quote, return exactly: []
-   Do not invent a finding to seem useful. An empty result is a valid, common,
-   and correct result.
-4. Every finding needs an honest confidence level -- this is reasoning about
+   a base class you can't see the body of), that is NOT a finding. Do not emit \
+   an item for it -- not even one phrased as "uncertain," "worth noting," or \
+   "might be missing." Uncertainty about code you cannot see is not evidence \
+   it's absent, and is never itself something to report.
+3. Only emit an item when a required check is ABSENT in code you CAN see --
+   not "no validation shown," not "doesn't check X" unless X is specifically \
+   the authorization/ownership check this pass looks for. If your only \
+   observation is a hedge ("I can't tell," "this doesn't validate...", "it's \
+   uncertain whether...") rather than a concrete absence, it does not belong \
+   in the output, no matter how useful it feels to mention.
+4. If nothing in the file clears the bar above, return exactly: []
+   An empty result is the correct, common, default outcome -- most files have
+   nothing to report here, and inventing a finding to seem useful is worse
+   than reporting none.
+5. Every finding needs an honest confidence level -- this is reasoning about
    intent, not a rule match, so never claim certainty a pattern-matcher would.
 
 Respond with ONLY a raw JSON array (no markdown fences), each item exactly:
 {"start_line": int, "end_line": int, "quoted_code": "...", "concern": "...", "confidence": "low"|"medium"|"high"}"""
 
 
-def review_file(file_path: str, model: str = "claude-sonnet-4-6") -> List[Dict[str, Any]]:
+def review_file(file_path: str, model: str = TRIAGE_MODEL) -> List[Dict[str, Any]]:
     path = Path(file_path)
     if not path.exists() or not path.is_file():
         return []
@@ -65,15 +75,19 @@ def review_file(file_path: str, model: str = "claude-sonnet-4-6") -> List[Dict[s
 
     # ponytail: see triage.py's triage_finding for why this needs a bound --
     # same blocking-pool-of-concurrent-calls shape, same fix.
-    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), timeout=60.0)
-    response = client.messages.create(
+    client = _llm_client()
+    response = _call_with_retry(
+        client,
         model=model,
         max_tokens=1200,
         temperature=0,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": f"File: {path.name}\n\n{numbered}"}],
+        timeout=60.0,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": f"File: {path.name}\n\n{numbered}"},
+        ],
     )
-    text = "".join(b.text for b in response.content if b.type == "text").strip()
+    text = (response.choices[0].message.content or "").strip()
     items = _parse_json_array(text)
 
     findings = []

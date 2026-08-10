@@ -6,17 +6,52 @@ already came from a rule match against real source code.
 
 import json
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List
 
-import anthropic
+import openai
+from openai import OpenAI
 
-# Bounded concurrency for triage calls: each is a separate Claude API request,
-# so this stays low enough to avoid a rate-limit thundering herd while still
-# fixing the real bug (triage_all used to run these one at a time -- on a scan
-# with dozens of findings, that meant tens of minutes of serial API latency
-# with zero progress feedback, which just looked like a hang).
-MAX_CONCURRENT_TRIAGE = 5
+# ponytail: routed off Anthropic's paid API (2026-08-10, ANTHROPIC_API_KEY
+# ran out of credits -- same key job-hunter hit 2026-08-09) onto Groq's free
+# tier -- own quota, separate from job-hunter's NVIDIA NIM key, so the two
+# don't compete. 30 RPM / 1,000 RPD / 12K TPM free (console.groq.com).
+# Swap back to anthropic.Anthropic(...) + "claude-sonnet-4-6" if that ever
+# proves insufficient.
+TRIAGE_MODEL = "llama-3.3-70b-versatile"
+
+
+def _llm_client() -> OpenAI:
+    return OpenAI(
+        base_url="https://api.groq.com/openai/v1",
+        api_key=os.getenv("GROQ_API_KEY"),
+    )
+
+
+def _call_with_retry(client: OpenAI, max_attempts: int = 5, **kwargs):
+    """Groq's free tier is 12K TPM -- a real ceiling this codebase hits under
+    concurrent load (confirmed 2026-08-10 on a full-repo scan), not a theoretical
+    one. The SDK's built-in retries aren't enough on their own once several
+    concurrent workers are all backed up on the same per-minute budget, so
+    retry explicitly with backoff long enough for the window to clear."""
+    last_error = None
+    for attempt in range(max_attempts):
+        try:
+            return client.chat.completions.create(**kwargs)
+        except openai.RateLimitError as e:
+            last_error = e
+            if attempt == max_attempts - 1:
+                raise
+            time.sleep(2 ** attempt * 3)  # 3, 6, 12, 24s
+    raise last_error
+
+
+# Bounded concurrency for triage calls: each is a separate LLM API request.
+# Dropped from 5 -> 3 (2026-08-10) after the Groq swap -- 5 concurrent workers
+# blew through Groq's 12K TPM free-tier ceiling on a real repo scan; 3 leaves
+# more per-minute budget for _call_with_retry's backoff to actually recover.
+MAX_CONCURRENT_TRIAGE = 3
 
 SYSTEM_PROMPT = """You are a security triage assistant. You will be given a single
 static-analysis finding (rule ID, severity, message, and the exact source code
@@ -50,13 +85,12 @@ def _parse_json_response(text: str) -> Dict[str, Any]:
         return {"explanation": text, "exploitability": "unknown", "suggested_fix": ""}
 
 
-def triage_finding(finding: Dict[str, Any], model: str = "claude-sonnet-4-6") -> Dict[str, Any]:
-    # ponytail: SDK default is a 600s read timeout with 2 retries -- since
-    # triage_all blocks on every concurrent call finishing, one stuck request
-    # can stall the whole scan_repo/scan_diff response for up to ~30 minutes,
-    # indistinguishable from a hang. Bound it so a stuck call fails fast and
-    # visibly instead.
-    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), timeout=60.0)
+def triage_finding(finding: Dict[str, Any], model: str = TRIAGE_MODEL) -> Dict[str, Any]:
+    # ponytail: SDK default read timeout is much longer -- since triage_all
+    # blocks on every concurrent call finishing, one stuck request can stall
+    # the whole scan_repo/scan_diff response for a long time, indistinguishable
+    # from a hang. Bound it so a stuck call fails fast and visibly instead.
+    client = _llm_client()
 
     user_message = (
         f"Rule: {finding['rule_id']}\n"
@@ -66,15 +100,20 @@ def triage_finding(finding: Dict[str, Any], model: str = "claude-sonnet-4-6") ->
         f"Source snippet (line numbers as in file):\n{finding['snippet']}"
     )
 
-    response = client.messages.create(
+    response = _call_with_retry(
+        client,
         model=model,
         max_tokens=600,
         temperature=0,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_message}],
+        timeout=60.0,
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_message},
+        ],
     )
 
-    text = "".join(block.text for block in response.content if block.type == "text").strip()
+    text = (response.choices[0].message.content or "").strip()
     parsed = _parse_json_response(text)
 
     return {**finding, **parsed, "finding_type": "rule_confirmed"}
