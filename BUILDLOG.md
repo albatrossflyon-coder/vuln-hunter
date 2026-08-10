@@ -23,7 +23,7 @@ It never invents a finding that Semgrep didn't already flag.
 
 ## Changelog
 
-### 2026-08-10 — Triage/business-logic layer moved off Anthropic (out of credits) onto Groq; two real regressions caught and fixed by testing before ship
+### 2026-08-10 5:12 PM CDT — Triage/business-logic layer moved off Anthropic (out of credits) onto Groq; two real regressions caught and fixed by testing before ship; commit `b7a9d4a`, pushed and confirmed on origin/master
 
 `ANTHROPIC_API_KEY` ran out of credits (same key exhaustion that hit job-hunter 2026-08-09), breaking both `triage.py` and `business_logic.py`. Swapped both from the `anthropic` SDK to Groq's free OpenAI-compatible endpoint (`llama-3.3-70b-versatile`) — a separate quota from job-hunter's NVIDIA NIM fix, chosen after independently verifying Groq's real free-tier limits (30 RPM / 1,000 RPD / 12K TPM, confirmed directly against Groq's docs after cross-checking multiple AI-brainstormer estimates, one of which overstated the daily limit by 14x) and finding a working `GROQ_API_KEY` already provisioned locally for the `/watch` skill's Whisper fallback — zero new signup needed.
 
