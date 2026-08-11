@@ -23,6 +23,29 @@ It never invents a finding that Semgrep didn't already flag.
 
 ## Changelog
 
+### 2026-08-10 10:00 PM CDT — TestSprite backend onboarding finished: 6 tests written, registered, and passing live (6/6)
+
+Earlier attempts this evening left 0 actual tests registered with TestSprite despite claims of "4 written" — turned out those were never persisted anywhere retrievable (not on disk, not in TestSprite via `testsprite test list`). Rewrote all 6 planned smoke tests fresh in `backend/testsprite_tests/`, each with assertions read directly from the real handler code in `main.py`/`telemetry.py` (response shapes, required/optional query params, which routes actually require `SCAN_API_KEY` and which don't — `/ignored` GET has no auth dependency, unlike `/ignore` POST/DELETE):
+
+- `test_health.py` — `GET /health` → `{"status": "ok"}`
+- `test_telemetry_summary.py` — `GET /telemetry/summary` → asserts the full real key set from `get_telemetry_summary()`
+- `test_telemetry_repos.py` — `GET /telemetry/repos` → list shape from `get_repo_staleness()`
+- `test_telemetry_events.py` — `GET /telemetry/events?limit=5` → list shape + limit respected
+- `test_telemetry_active.py` — `GET /telemetry/active` → list shape from `get_active_scans()`
+- `test_ignored_validation_error.py` — `GET /ignored` with no `repo_path` → asserts a real `422`, not guessed
+
+**Verified twice, not once:** ran all 6 locally with plain `python` against the live Render backend first (6/6 passed) before spending any TestSprite credits, then registered all 6 via `testsprite test create --code-file` and ran the real batch via `testsprite test run --all --wait` — **6/6 passed for real** through TestSprite's own execution, not just local. Committed to the repo (`backend/testsprite_tests/`).
+
+### 2026-08-10 9:45 PM CDT — SCAN_API_KEY generated and wired end-to-end (local, Render, TestSprite), for the TestSprite onboarding blocked on it since earlier tonight
+
+The 4 TestSprite smoke tests written earlier tonight (`/health`, `/telemetry/summary`, `/telemetry/repos`, `/telemetry/events`) don't need auth, but the remaining write-endpoint tests (`/telemetry/active`, `/ignored`, and any real scan-trigger test) do — they were blocked on `SCAN_API_KEY` not existing anywhere yet. Generated a random 64-char hex value (`secrets.token_hex(32)`) and wired it into all three places that need to agree on it:
+
+1. **`backend/.env`** — added directly. Note: `main.py` loads this via `load_dotenv`, and `require_scan_key`'s own docstring says the key is meant to be *unset* locally so CLI/local-dev scans stay frictionless — adding it here means local scans now also require the `X-API-Key` header. Deliberate tradeoff for this session (consistent value across environments), flagged in case future local dev friction traces back to this.
+2. **Render (`vuln-hunter-backend`, `srv-d9q4o1ss728c739191pg`)** — set via direct Render REST API call (`PUT /v1/services/{id}/env-vars/SCAN_API_KEY`), not the `render` CLI (no env-var subcommand exists in CLI v2.22.0, checked directly) and not the `render` MCP server (still fails with the known DCR OAuth incompatibility, see `project-render-mcp-dcr-auth-failure` memory). **Important finding:** the env-var API call does NOT auto-trigger a redeploy — the docs don't say so either way, and empirically the running instance kept 401-ing on the correct key until an explicit `render deploys create` was run. Anyone editing Render env vars via the API (not the dashboard UI) needs to trigger a deploy separately or the change is inert.
+3. **TestSprite** (`vuln-hunter backend` project, `a7c88561-77d7-4d63-a734-f100893cf3a9`) — set as the project's backend test credential via `testsprite project credential --type "API key"`. TestSprite's own docs don't document which header name their "API key" credential type actually injects, so this was verified empirically rather than trusted from docs.
+
+**Verified live, not just deployed:** direct `curl` against the hosted backend post-deploy — no key → real `401 Missing or invalid X-API-Key`; correct key → auth passes, request instead fails on body validation (`missing: scan_id`), confirming the key check itself is the thing that changed, not a coincidental pass.
+
 ### 2026-08-10 5:12 PM CDT — Triage/business-logic layer moved off Anthropic (out of credits) onto Groq; two real regressions caught and fixed by testing before ship; commit `b7a9d4a`, pushed and confirmed on origin/master
 
 `ANTHROPIC_API_KEY` ran out of credits (same key exhaustion that hit job-hunter 2026-08-09), breaking both `triage.py` and `business_logic.py`. Swapped both from the `anthropic` SDK to Groq's free OpenAI-compatible endpoint (`llama-3.3-70b-versatile`) — a separate quota from job-hunter's NVIDIA NIM fix, chosen after independently verifying Groq's real free-tier limits (30 RPM / 1,000 RPD / 12K TPM, confirmed directly against Groq's docs after cross-checking multiple AI-brainstormer estimates, one of which overstated the daily limit by 14x) and finding a working `GROQ_API_KEY` already provisioned locally for the `/watch` skill's Whisper fallback — zero new signup needed.
