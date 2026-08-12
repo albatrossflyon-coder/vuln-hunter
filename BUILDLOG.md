@@ -11,6 +11,12 @@ and fix suggestions.
 
 ---
 
+## 2026-08-12 — Added LEARNINGS.md (Kaizen self-evolving pattern)
+
+Added `LEARNINGS.md` at repo root, seeded with 6 real entries from actual session history (the trivy `UNKNOWN`-severity dashboard-counter gap, the `scan_repo` 300s hardcoded semgrep timeout, the `scan_diff` hang root-caused to `get_changed_files` missing `stdin=DEVNULL`, the dashboard's temp-path-instead-of-real-URL display bug, the fp-check-before-external-reports lesson, the recurring `fff-mcp` disconnect-during-scans pattern) — not an empty scaffold. This wires the repo into the `start-to-finish` skill's Kaizen layer: Step 1 checks this file before diagnosing a new issue here, Step 8 adds new entries after finishing if something non-obvious came up. Committed `8b934e1`, pushed, remote SHA independently verified.
+
+---
+
 ## Why hybrid, not pure-LLM
 
 Asking an LLM to freely hunt for vulnerabilities produces too many false
