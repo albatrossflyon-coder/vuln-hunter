@@ -21,6 +21,30 @@ from openai import OpenAI
 # proves insufficient.
 TRIAGE_MODEL = "llama-3.3-70b-versatile"
 
+# ponytail: fallback chain for Groq's *daily* token cap (TPD), which the
+# backoff below can't wait out (confirmed 2026-08-13: 429 said "try again in
+# 14m47s", not seconds). Three independent free-tier providers, tried in
+# order, so one or two hitting a daily cap the same day (confirmed to
+# actually happen 2026-08-13 -- Groq and OpenRouter both exhausted at once)
+# doesn't fail the scan. Each is its own account/quota, no shared ceiling.
+FALLBACK_PROVIDERS = [
+    {
+        "base_url": "https://openrouter.ai/api/v1",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "model": "nvidia/nemotron-3-super-120b-a12b:free",
+    },
+    {
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "api_key_env": "GEMINI_API_KEY",
+        "model": "gemini-3.7-flash",
+    },
+    {
+        "base_url": "https://api.mistral.ai/v1",
+        "api_key_env": "MISTRAL_API_KEY",
+        "model": "devstral-2512",  # code-focused, 1M TPM on this account -- most headroom of any tier here
+    },
+]
+
 
 def _llm_client() -> OpenAI:
     return OpenAI(
@@ -42,8 +66,23 @@ def _call_with_retry(client: OpenAI, max_attempts: int = 5, **kwargs):
         except openai.RateLimitError as e:
             last_error = e
             if attempt == max_attempts - 1:
-                raise
+                break
             time.sleep(2 ** attempt * 3)  # 3, 6, 12, 24s
+
+    # Groq's per-minute retries are exhausted. If this is the daily cap
+    # (not a transient per-minute spike), it won't clear within this backoff
+    # window -- walk the fallback chain rather than failing the scan.
+    for provider in FALLBACK_PROVIDERS:
+        fallback_client = OpenAI(
+            base_url=provider["base_url"],
+            api_key=os.getenv(provider["api_key_env"]),
+        )
+        try:
+            return fallback_client.chat.completions.create(
+                **{**kwargs, "model": provider["model"]}
+            )
+        except Exception:
+            continue
     raise last_error
 
 

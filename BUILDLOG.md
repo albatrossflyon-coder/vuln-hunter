@@ -29,7 +29,13 @@ It never invents a finding that Semgrep didn't already flag.
 
 ## Changelog
 
-### 2026-08-13 — Root-caused the recurring "MCP error -32000: Connection closed" to an orphaned upstream process, not flakiness
+### 2026-08-13 6:00 PM CDT — triage.py: 3-provider fallback chain (Groq → OpenRouter → Gemini → Mistral)
+
+**Status: committed, pushed, remote SHA independently verified below.**
+
+Groq's daily token cap (100K TPD) and OpenRouter's free-tier daily cap (50 free-model requests/day) both got exhausted the same evening — a real, confirmed collision, not theoretical. `_call_with_retry`'s existing backoff (3/6/12/24s) can't wait out a *daily* cap that says "try again in 14m47s." Added `FALLBACK_PROVIDERS`, a list `_call_with_retry` walks after Groq's retries exhaust: OpenRouter (`nvidia/nemotron-3-super-120b-a12b:free`, already proven working in nanobot) → Gemini (`gemini-3.7-flash`, genuinely free via AI Studio, verified 2026-08-13 — the paid-looking "$0.75/1M" price from a promo email is a separate billed tier, not this one) → Mistral (`devstral-2512`, code-focused, 1,000,000 TPM on this account — the most headroom of any tier here, verified against the account's real per-model rate-limit page rather than guessed). Each is an independent daily quota on a separate account, so one or two colliding doesn't take the whole triage layer down. `MISTRAL_API_KEY` and `GEMINI_API_KEY` added to `backend/.env`. Verified end-to-end with a real smoke test against a live finding (Groq still exhausted at test time, so it genuinely exercised the fallback path, not just imports) — got a correct, sensible triage response back.
+
+### 2026-08-13 6:05 PM CDT — Root-caused the recurring "MCP error -32000: Connection closed" to an orphaned upstream process, not flakiness
 
 Hit "Connection closed" twice in one session (once mid `scan_diff`, once mid `scan_repo`) and, instead of just falling back to direct semgrep again like every prior time, actually checked for a cause. Found two `mcp_server.py` processes running via `Get-CimInstance Win32_Process`: PID 2776 (parent `jmunch-mcp.exe`, PID 14508) and PID 26548 (parent 2776, i.e. vuln-hunter's own server had itself spawned a further child). **`jmunch-mcp.exe` (the proxy Claude Code actually talks to) was already dead** — `Get-Process -Id 14508` returned nothing — but its child tree survived as orphans. Root cause is in `jmunch_mcp/proxy.py`: `Proxy.run()` spawns the upstream child but never explicitly terminates it on any exit path (only cancels its own asyncio tasks). Killed both orphans (`taskkill /F`). Documented in `LEARNINGS.md` under `operations` so the next "Connection closed" gets diagnosed, not just worked around — this is a `jmunch-mcp` bug (not ours to fix in this repo), but checking for and killing the orphan is a real, repeatable recovery step.
 
