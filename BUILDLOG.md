@@ -29,6 +29,10 @@ It never invents a finding that Semgrep didn't already flag.
 
 ## Changelog
 
+### 2026-08-13 — Root-caused the recurring "MCP error -32000: Connection closed" to an orphaned upstream process, not flakiness
+
+Hit "Connection closed" twice in one session (once mid `scan_diff`, once mid `scan_repo`) and, instead of just falling back to direct semgrep again like every prior time, actually checked for a cause. Found two `mcp_server.py` processes running via `Get-CimInstance Win32_Process`: PID 2776 (parent `jmunch-mcp.exe`, PID 14508) and PID 26548 (parent 2776, i.e. vuln-hunter's own server had itself spawned a further child). **`jmunch-mcp.exe` (the proxy Claude Code actually talks to) was already dead** — `Get-Process -Id 14508` returned nothing — but its child tree survived as orphans. Root cause is in `jmunch_mcp/proxy.py`: `Proxy.run()` spawns the upstream child but never explicitly terminates it on any exit path (only cancels its own asyncio tasks). Killed both orphans (`taskkill /F`). Documented in `LEARNINGS.md` under `operations` so the next "Connection closed" gets diagnosed, not just worked around — this is a `jmunch-mcp` bug (not ours to fix in this repo), but checking for and killing the orphan is a real, repeatable recovery step.
+
 ### 2026-08-10 10:00 PM CDT — TestSprite backend onboarding finished: 6 tests written, registered, and passing live (6/6)
 
 Earlier attempts this evening left 0 actual tests registered with TestSprite despite claims of "4 written" — turned out those were never persisted anywhere retrievable (not on disk, not in TestSprite via `testsprite test list`). Rewrote all 6 planned smoke tests fresh in `backend/testsprite_tests/`, each with assertions read directly from the real handler code in `main.py`/`telemetry.py` (response shapes, required/optional query params, which routes actually require `SCAN_API_KEY` and which don't — `/ignored` GET has no auth dependency, unlike `/ignore` POST/DELETE):
