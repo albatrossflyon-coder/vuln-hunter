@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List
 
 import openai
+from langfuse import get_client
 from openai import OpenAI
 
 # ponytail: routed off Anthropic's paid API (2026-08-10, ANTHROPIC_API_KEY
@@ -53,37 +54,67 @@ def _llm_client() -> OpenAI:
     )
 
 
+def _update_generation_from_completion(generation, response, *, model: str) -> None:
+    """Map an OpenAI-style ChatCompletion response onto the active Langfuse
+    generation. Shared by the primary call and every fallback-provider retry
+    so usage/output reporting is consistent regardless of which provider
+    actually served the request."""
+    content = None
+    if response.choices:
+        content = response.choices[0].message.content
+    usage_details = None
+    if response.usage:
+        usage_details = {
+            "input": response.usage.prompt_tokens or 0,
+            "output": response.usage.completion_tokens or 0,
+            "total": response.usage.total_tokens or 0,
+        }
+    generation.update(model=model, output=content, usage_details=usage_details)
+
+
 def _call_with_retry(client: OpenAI, max_attempts: int = 5, **kwargs):
     """Groq's free tier is 12K TPM -- a real ceiling this codebase hits under
     concurrent load (confirmed 2026-08-10 on a full-repo scan), not a theoretical
     one. The SDK's built-in retries aren't enough on their own once several
     concurrent workers are all backed up on the same per-minute budget, so
     retry explicitly with backoff long enough for the window to clear."""
-    last_error = None
-    for attempt in range(max_attempts):
-        try:
-            return client.chat.completions.create(**kwargs)
-        except openai.RateLimitError as e:
-            last_error = e
-            if attempt == max_attempts - 1:
-                break
-            time.sleep(2 ** attempt * 3)  # 3, 6, 12, 24s
+    langfuse = get_client()
+    with langfuse.start_as_current_observation(
+        as_type="generation",
+        name="vuln-hunter-triage",
+        model=kwargs.get("model"),
+        input=kwargs.get("messages"),
+    ) as generation:
+        last_error = None
+        for attempt in range(max_attempts):
+            try:
+                response = client.chat.completions.create(**kwargs)
+                _update_generation_from_completion(generation, response, model=kwargs.get("model"))
+                return response
+            except openai.RateLimitError as e:
+                last_error = e
+                if attempt == max_attempts - 1:
+                    break
+                time.sleep(2 ** attempt * 3)  # 3, 6, 12, 24s
 
-    # Groq's per-minute retries are exhausted. If this is the daily cap
-    # (not a transient per-minute spike), it won't clear within this backoff
-    # window -- walk the fallback chain rather than failing the scan.
-    for provider in FALLBACK_PROVIDERS:
-        fallback_client = OpenAI(
-            base_url=provider["base_url"],
-            api_key=os.getenv(provider["api_key_env"]),
-        )
-        try:
-            return fallback_client.chat.completions.create(
-                **{**kwargs, "model": provider["model"]}
+        # Groq's per-minute retries are exhausted. If this is the daily cap
+        # (not a transient per-minute spike), it won't clear within this backoff
+        # window -- walk the fallback chain rather than failing the scan.
+        for provider in FALLBACK_PROVIDERS:
+            fallback_client = OpenAI(
+                base_url=provider["base_url"],
+                api_key=os.getenv(provider["api_key_env"]),
             )
-        except Exception:
-            continue
-    raise last_error
+            try:
+                response = fallback_client.chat.completions.create(
+                    **{**kwargs, "model": provider["model"]}
+                )
+                _update_generation_from_completion(generation, response, model=provider["model"])
+                return response
+            except Exception:
+                continue
+        generation.update(level="ERROR", status_message=str(last_error) if last_error else "all providers exhausted")
+        raise last_error
 
 
 # Bounded concurrency for triage calls: each is a separate LLM API request.

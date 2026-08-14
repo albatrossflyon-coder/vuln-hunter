@@ -11,6 +11,14 @@ and fix suggestions.
 
 ---
 
+## 2026-08-13 — Langfuse tracing wired into triage.py's LLM call path
+
+Instrumented `_call_with_retry` (the single funnel every triage call already routes through — primary Groq call plus all three fallback providers) with a Langfuse `generation` observation: model name, full input messages, output content, and real token usage (mapped from the OpenAI-style `usage.prompt_tokens`/`completion_tokens`/`total_tokens` into Langfuse's `usage_details` convention) via a shared `_update_generation_from_completion` helper, so the mapping is identical whether Groq or a fallback provider actually served the call. `langfuse` package installed into `backend/venv` (the actual venv the MCP server runs from, not the global Python). Second tool wired into Langfuse tonight, after nanobot — one at a time per explicit instruction, see `albatross-automations/BUILDLOG.md` for the cross-project rollout status.
+
+**Verified for real:** called `triage_finding()` directly against a synthetic-but-real finding (`eval(user_input)`), loading `backend/.env` the same way `mcp_server.py`/`cli.py`/`main.py` already do (`load_dotenv(Path(__file__).parent / ".env")`) rather than guessing at env var propagation. Got a genuine correct triage result back (`exploitability: critical`, real explanation and fix suggestion) — then fetched the actual observation from Langfuse via its REST API and confirmed real data: `model: llama-3.3-70b-versatile` (primary Groq succeeded, no fallback needed), real `usageDetails` (input 306 / output 131 / total 437), full input/output captured correctly.
+
+**Not done this pass:** the live MCP server process (wrapped by `jmunch-mcp`, PID confirmed running from `backend/venv`) was not restarted to pick up this code change — that requires a `/mcp` reconnect only the user can trigger, per the known jmunch-mcp orphan-process behavior. The code path itself is proven correct via direct invocation; the next real scan run through the actual MCP tool will be the first live confirmation, not yet observed.
+
 ## 2026-08-12 — Added LEARNINGS.md (Kaizen self-evolving pattern)
 
 Added `LEARNINGS.md` at repo root, seeded with 6 real entries from actual session history (the trivy `UNKNOWN`-severity dashboard-counter gap, the `scan_repo` 300s hardcoded semgrep timeout, the `scan_diff` hang root-caused to `get_changed_files` missing `stdin=DEVNULL`, the dashboard's temp-path-instead-of-real-URL display bug, the fp-check-before-external-reports lesson, the recurring `fff-mcp` disconnect-during-scans pattern) — not an empty scaffold. This wires the repo into the `start-to-finish` skill's Kaizen layer: Step 1 checks this file before diagnosing a new issue here, Step 8 adds new entries after finishing if something non-obvious came up. Committed `8b934e1`, pushed, remote SHA independently verified.
