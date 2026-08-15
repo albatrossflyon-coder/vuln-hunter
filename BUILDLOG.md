@@ -11,6 +11,20 @@ and fix suggestions.
 
 ---
 
+## 2026-08-14 8:25 PM CDT — Feature idea captured from deepsec (Vercel Labs): diff-mode + revalidate pass
+
+**Status: idea captured, not built.**
+
+Evaluated `vercel-labs/deepsec` (read-first-then-scanned per the standing security rule — 66 findings, none real: `fixtures/vulnerable-app/` is deepsec's own deliberately-vulnerable test app for validating its detection matchers, the "leaked" API key is inside its own `dev-auth-bypass.ts` matcher pattern, and the rest is standard `pnpm-lock.yaml` dependency-CVE hygiene). It's a same-category tool to this one — agent-powered SAST — but built for expensive, one-shot deep audits of large mature codebases using top-tier reasoning models (its own README states scans can cost thousands to tens-of-thousands of dollars), not the cheap/frequent scanning this repo does. Not adopted — cost model and paid-API-key requirement don't fit how Chris actually uses security scanning (evaluating many candidate repos cheaply via free-tier models).
+
+**Two things worth stealing for `vuln-hunter`, though:**
+1. **`process --diff` mode** — deepsec can run its AI investigation on just the files changed in a diff, meant for PR review/CI gating. `vuln-hunter` currently has `scan_repo` (full repo) and `scan_diff` (already exists, per the fast-path note in CLAUDE.md's Quality Gate section) — worth checking `scan_diff`'s actual feature parity against this pattern rather than assuming it already covers the same ground.
+2. **`revalidate` pass** — a dedicated step that re-checks existing findings against git history to cut the false-positive rate before a finding gets reported. This directly targets a real recurring problem: Chris has been burned before filing a security advisory off a single semgrep line that turned out to be a false positive (see `feedback-run-fp-check-before-external-reports` in CC memory) — the `fp-check` skill is the current manual mitigation, but a built-in automated revalidation pass would close this gap at the tool level instead of relying on remembering to run a separate skill every time.
+
+Reference clone kept for study (not installed, not run — running it costs real money against its own stated pricing): `C:\Repos\reference-repos\deepsec`.
+
+---
+
 ## 2026-08-13 — Langfuse tracing wired into triage.py's LLM call path
 
 Instrumented `_call_with_retry` (the single funnel every triage call already routes through — primary Groq call plus all three fallback providers) with a Langfuse `generation` observation: model name, full input messages, output content, and real token usage (mapped from the OpenAI-style `usage.prompt_tokens`/`completion_tokens`/`total_tokens` into Langfuse's `usage_details` convention) via a shared `_update_generation_from_completion` helper, so the mapping is identical whether Groq or a fallback provider actually served the call. `langfuse` package installed into `backend/venv` (the actual venv the MCP server runs from, not the global Python). Second tool wired into Langfuse tonight, after nanobot — one at a time per explicit instruction, see `albatross-automations/BUILDLOG.md` for the cross-project rollout status.
