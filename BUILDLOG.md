@@ -11,6 +11,14 @@ and fix suggestions.
 
 ---
 
+## 2026-08-18 11:18 PM CDT — Groq→Z.AI triage swap + GraphQL scaffold: committed, self-scan verified before push
+
+**What shipped:** `backend/triage.py` primary LLM moved off Groq (deprecated the prior model with no warning, replacement's free tier capped too tight for real scans) onto Z.AI (`glm-4.7-flash`); Groq demoted to first fallback (`gpt-oss-120b`) rather than dropped. `_call_with_retry` now catches non-rate-limit `APIStatusError`s (e.g. a deprecated/renamed model) and falls through to the fallback chain instead of crashing outright — this exact gap is what caused the Groq deprecation to break the live scan pipeline in the first place. Also added `backend/schema.py`, a Strawberry GraphQL scaffold (types/resolvers stubbed, TODOs point at real data sources), wired into `main.py` at `/graphql` — output of a real Pi↔Claude Code multi-agent handoff test (Pi wrote the plan, Claude Code implemented it) on branch `feature/graphql-scaffold`.
+
+**Verified before trusting the triage.py change:** rather than assume the swap didn't break the scanner, ran a real `scan_repo` against a freshly-cloned external target (`duolahypercho/codex-router`, cloned to `reference-repos/` per the New Repo Security Scan Rule) through the live MCP tool — i.e. the actual code path that now hits Z.AI instead of Groq. Came back clean (no error, no timeout) with 15 real findings (13 `detect-child-process` command-injection-pattern warnings in the target's installer scripts, 1 dependency CVE, one flagged high-exploitability with a concrete suggested fix) — confirms the scanner itself is still functioning correctly post-change, not just that the code imports cleanly. Committed `48809f4` on `feature/graphql-scaffold`, not yet pushed as of this entry.
+
+---
+
 ## 2026-08-14 8:25 PM CDT — Feature idea captured from deepsec (Vercel Labs): diff-mode + revalidate pass
 
 **Status: idea captured, not built.**
