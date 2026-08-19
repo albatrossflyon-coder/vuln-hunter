@@ -9,6 +9,14 @@ and fix suggestions.
 
 **Rule: Update this file every time a file is added, changed, or a feature ships.**
 
+## Tech Stack
+
+- **Languages**: Python, TypeScript
+- **Frameworks/Libraries**: FastAPI, Next.js, React, Tailwind CSS
+- **AI/ML**: Z.AI (triage/exploitability, current), Groq/Llama 3.3 70B (earlier fallback), MCP Protocol, GraphQL (strawberry-graphql, scaffold stage)
+- **Cloud/Hosting**: Vercel (frontend), Render (backend)
+- **Dev Tools**: Semgrep, Gitleaks, pip-audit, Trivy, pytest, Rich, Textual
+
 ---
 
 ## 2026-08-18 11:18 PM CDT — Groq→Z.AI triage swap + GraphQL scaffold: committed, self-scan verified before push
