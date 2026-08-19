@@ -16,11 +16,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from strawberry.fastapi import GraphQLRouter
+
 import all_scanners
 import ignore_store
 import telemetry
 from sarif import to_sarif
 from scanner import get_changed_files
+from schema import schema as graphql_schema
 
 # Only http(s) git URLs -- this box runs on your own machine against your own
 # git binary, so it's equivalent to typing `git clone <url>` yourself. This
@@ -36,6 +39,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Scaffold only -- see schema.py. Not gated behind require_scan_key yet since
+# every resolver in it is still a stub with no real data access.
+app.include_router(GraphQLRouter(graphql_schema), prefix="/graphql")
 
 
 def require_scan_key(x_api_key: str | None = Header(default=None)):

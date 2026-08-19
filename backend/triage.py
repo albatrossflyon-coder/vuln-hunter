@@ -16,41 +16,56 @@ from openai import OpenAI
 
 # ponytail: routed off Anthropic's paid API (2026-08-10, ANTHROPIC_API_KEY
 # ran out of credits -- same key job-hunter hit 2026-08-09) onto Groq's free
-# tier -- own quota, separate from job-hunter's NVIDIA NIM key, so the two
-# don't compete. 30 RPM / 1,000 RPD / 12K TPM free (console.groq.com).
-# Swap back to anthropic.Anthropic(...) + "claude-sonnet-4-6" if that ever
-# proves insufficient.
-TRIAGE_MODEL = "llama-3.3-70b-versatile"
+# tier, then off Groq (2026-08-19, after Groq deprecated the prior model with
+# zero warning AND its replacement's free tier turned out to cap at 8K TPM --
+# too tight for real scans) onto Z.AI's free tier instead. Own quota, separate
+# key from Pi's WSL2 setup so the two don't compete. Swap back to
+# anthropic.Anthropic(...) + "claude-sonnet-4-6" if this ever proves
+# insufficient too.
+TRIAGE_MODEL = "glm-4.7-flash"
 
-# ponytail: fallback chain for Groq's *daily* token cap (TPD), which the
-# backoff below can't wait out (confirmed 2026-08-13: 429 said "try again in
-# 14m47s", not seconds). Three independent free-tier providers, tried in
-# order, so one or two hitting a daily cap the same day (confirmed to
-# actually happen 2026-08-13 -- Groq and OpenRouter both exhausted at once)
-# doesn't fail the scan. Each is its own account/quota, no shared ceiling.
+# ponytail: fallback chain, tried in order when the primary hits a rate limit
+# or any other API error (model deprecated/renamed, daily cap, etc.) -- see
+# _call_with_retry. Groq demoted from primary to fallback 2026-08-19 rather
+# than dropped outright, so its capacity isn't lost, just no longer a single
+# point of failure. Each provider is its own account/quota, no shared ceiling.
+# "extra" holds kwargs that only apply to that one provider's call -- e.g.
+# gpt-oss-120b is a reasoning model that needs reasoning_effort capped or it
+# burns the token budget on internal reasoning before writing the JSON
+# answer (confirmed 2026-08-19); other providers don't recognize that
+# parameter, so it must NOT be sent to them.
 FALLBACK_PROVIDERS = [
+    {
+        "base_url": "https://api.groq.com/openai/v1",
+        "api_key_env": "GROQ_API_KEY",
+        "model": "openai/gpt-oss-120b",
+        "extra": {"reasoning_effort": "low"},
+    },
     {
         "base_url": "https://openrouter.ai/api/v1",
         "api_key_env": "OPENROUTER_API_KEY",
         "model": "nvidia/nemotron-3-super-120b-a12b:free",
+        "extra": {},
     },
     {
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
         "api_key_env": "GEMINI_API_KEY",
         "model": "gemini-3.7-flash",
+        "extra": {},
     },
     {
         "base_url": "https://api.mistral.ai/v1",
         "api_key_env": "MISTRAL_API_KEY",
         "model": "devstral-2512",  # code-focused, 1M TPM on this account -- most headroom of any tier here
+        "extra": {},
     },
 ]
 
 
 def _llm_client() -> OpenAI:
     return OpenAI(
-        base_url="https://api.groq.com/openai/v1",
-        api_key=os.getenv("GROQ_API_KEY"),
+        base_url="https://api.z.ai/api/paas/v4/",
+        api_key=os.getenv("ZAI_API_KEY"),
     )
 
 
@@ -96,10 +111,20 @@ def _call_with_retry(client: OpenAI, max_attempts: int = 5, **kwargs):
                 if attempt == max_attempts - 1:
                     break
                 time.sleep(2 ** attempt * 3)  # 3, 6, 12, 24s
+            except openai.APIStatusError as e:
+                # Non-rate-limit API error (model deprecated/renamed, bad
+                # request, etc.) -- confirmed 2026-08-19 when Groq retired
+                # llama-3.3-70b-versatile and this fell straight through the
+                # RateLimitError-only catch above into an unhandled crash,
+                # skipping the fallback chain entirely. Retrying the identical
+                # request won't fix a model that doesn't exist, so go straight
+                # to the fallback providers instead of burning the backoff window.
+                last_error = e
+                break
 
-        # Groq's per-minute retries are exhausted. If this is the daily cap
-        # (not a transient per-minute spike), it won't clear within this backoff
-        # window -- walk the fallback chain rather than failing the scan.
+        # Groq's per-minute retries are exhausted, or the primary hit a
+        # non-transient error above. Walk the fallback chain rather than
+        # failing the scan.
         for provider in FALLBACK_PROVIDERS:
             fallback_client = OpenAI(
                 base_url=provider["base_url"],
@@ -107,7 +132,7 @@ def _call_with_retry(client: OpenAI, max_attempts: int = 5, **kwargs):
             )
             try:
                 response = fallback_client.chat.completions.create(
-                    **{**kwargs, "model": provider["model"]}
+                    **{**kwargs, **provider.get("extra", {}), "model": provider["model"]}
                 )
                 _update_generation_from_completion(generation, response, model=provider["model"])
                 return response
@@ -173,7 +198,7 @@ def triage_finding(finding: Dict[str, Any], model: str = TRIAGE_MODEL) -> Dict[s
     response = _call_with_retry(
         client,
         model=model,
-        max_tokens=600,
+        max_tokens=1200,
         temperature=0,
         timeout=60.0,
         response_format={"type": "json_object"},
