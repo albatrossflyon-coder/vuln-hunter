@@ -12,6 +12,26 @@ AI-assisted security code reviewer, built on a hybrid architecture: **Semgrep do
 
 ---
 
+## Tech Stack
+
+<div align="center">
+
+| 🔌 AI & Protocols | 💻 Languages |
+|:---:|:---:|
+| <br><img src="https://img.shields.io/badge/Z.AI-6C5CE7?style=for-the-badge" /> <img src="https://img.shields.io/badge/Groq-F55036?style=for-the-badge" /> <img src="https://img.shields.io/badge/MCP-Model_Context_Protocol-000000?style=for-the-badge" /> <img src="https://img.shields.io/badge/GraphQL-E10098?style=for-the-badge&logo=graphql&logoColor=white" /><br> | <br><img src="https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white" /> <img src="https://img.shields.io/badge/TypeScript-3178C6?style=for-the-badge&logo=typescript&logoColor=white" /><br> |
+
+| 🌐 Web & Backend Frameworks | ☁️ Cloud & Hosting |
+|:---:|:---:|
+| <br><img src="https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white" /> <img src="https://img.shields.io/badge/Next.js-000000?style=for-the-badge&logo=nextdotjs&logoColor=white" /> <img src="https://img.shields.io/badge/React-61DAFB?style=for-the-badge&logo=react&logoColor=black" /> <img src="https://img.shields.io/badge/Tailwind_CSS-06B6D4?style=for-the-badge&logo=tailwindcss&logoColor=white" /><br> | <br><img src="https://img.shields.io/badge/Vercel-000000?style=for-the-badge&logo=vercel&logoColor=white" /> <img src="https://img.shields.io/badge/Render-46E3B7?style=for-the-badge&logo=render&logoColor=white" /><br> |
+
+| 🔒 Security & Scanning | 🧰 Dev Tools |
+|:---:|:---:|
+| <br><img src="https://img.shields.io/badge/Semgrep-4B32C3?style=for-the-badge&logo=semgrep&logoColor=white" /> <img src="https://img.shields.io/badge/Gitleaks-FBBF24?style=for-the-badge" /> <img src="https://img.shields.io/badge/pip--audit-3776AB?style=for-the-badge&logo=python&logoColor=white" /> <img src="https://img.shields.io/badge/Trivy-1904DA?style=for-the-badge" /><br> | <br><img src="https://img.shields.io/badge/pytest-0A9EDC?style=for-the-badge&logo=pytest&logoColor=white" /> <img src="https://img.shields.io/badge/Rich-FAE742?style=for-the-badge" /> <img src="https://img.shields.io/badge/Textual-000000?style=for-the-badge" /><br> |
+
+</div>
+
+---
+
 ## Why hybrid, not pure-LLM
 
 Asking an LLM to freely hunt for vulnerabilities produces too many false positives and false negatives to be credible — that's the classic failure mode of "AI security tools." vuln-hunter splits the job instead:

@@ -9,6 +9,14 @@ and fix suggestions.
 
 **Rule: Update this file every time a file is added, changed, or a feature ships.**
 
+## Tech Stack
+
+- **Languages**: Python, TypeScript
+- **Frameworks/Libraries**: FastAPI, Next.js, React, Tailwind CSS
+- **AI/ML**: Z.AI (triage/exploitability, current), Groq/Llama 3.3 70B (earlier fallback), MCP Protocol, GraphQL (strawberry-graphql, scaffold stage)
+- **Cloud/Hosting**: Vercel (frontend), Render (backend)
+- **Dev Tools**: Semgrep, Gitleaks, pip-audit, Trivy, pytest, Rich, Textual
+
 ---
 
 ## 2026-08-14 8:25 PM CDT — Feature idea captured from deepsec (Vercel Labs): diff-mode + revalidate pass
