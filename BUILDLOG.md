@@ -19,6 +19,18 @@ and fix suggestions.
 
 ---
 
+## 2026-08-21 12:20 AM CDT — GraphQL: auth gate + frontend demo panel, feature now end-to-end
+
+**Auth gate:** `/graphql` now behind `require_scan_key`, stricter than this codebase's existing pattern (read-only `/telemetry`/`/health` stay open) since all 3 resolvers are live and GraphQL invites future mutations. Verified with a real `TestClient`: no key → 401, wrong key → 401, right key → 200 and reaches the resolver, `/health` unaffected.
+
+**Frontend:** new "Lookup Scan by ID" panel on the dashboard (`frontend/app/dashboard/page.tsx`), querying `queryScan` + `findingsForScan` in one round trip through a new `frontend/app/api/graphql/route.ts` server-side proxy (same `SCAN_API_KEY`-off-the-browser pattern as the existing `scan-url/route.ts`). Caught one real bug before implementation: Hermes' plan used snake_case (`repo_id`, `scan_id`) but Strawberry's live schema is camelCase (`repoId`, `findingsForScan(scanId:...)`) — confirmed directly via `schema.schema.as_str()`, corrected before Claude Code implemented it.
+
+**Verified for real:** ran both dev servers locally, hit the proxy route with `curl` against a real `scan_id`, then did an actual browser click-through (chrome-devtools-mcp) confirming the panel renders and shows real data. `scan_diff` clean on both diffs.
+
+**GraphQL feature is now functionally complete end-to-end** (backend + gate + frontend). Not done: merge to `master` (holding pending review).
+
+---
+
 ## 2026-08-20 11:14 PM CDT — GraphQL scaffold → all 3 resolvers live, via a real 3-agent herdr handoff (2 phases)
 
 **Phase 1 — query_repo/query_scan:** wired to real data — `query_repo` scans `telemetry.get_repo_staleness()` for a matching `repo_path`; `query_scan` runs a direct SQL lookup against the `scans` table via `telemetry._connect()` (no existing `get_scan_by_id` helper to reuse — confirmed by listing every function in `telemetry.py` before writing new SQL).
