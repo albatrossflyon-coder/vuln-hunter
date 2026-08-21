@@ -30,6 +30,7 @@ from typing import Any, Dict, Iterator, List, Optional
 import psutil
 
 import ignore_store
+from ignore_store import fingerprint
 
 DB_PATH = Path(__file__).parent / "vuln_hunter_telemetry.db"
 JSONL_PATH = Path(__file__).parent / "vuln_hunter_events.jsonl"
@@ -150,6 +151,24 @@ def init_db() -> None:
         );
         """)
         conn.execute("""
+        CREATE TABLE IF NOT EXISTS findings (
+            finding_id TEXT PRIMARY KEY,
+            scan_id TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+            rule_id TEXT NOT NULL,
+            path TEXT NOT NULL,
+            start_line INTEGER,
+            end_line INTEGER,
+            matched_code TEXT,
+            snippet TEXT,
+            severity TEXT,
+            exploitability TEXT,
+            message TEXT,
+            triage_status TEXT,
+            ai_reasoning TEXT,
+            timestamp REAL NOT NULL
+        );
+        """)
+        conn.execute("""
         CREATE TABLE IF NOT EXISTS events (
             event_id INTEGER PRIMARY KEY AUTOINCREMENT,
             scan_id TEXT REFERENCES scans(scan_id) ON DELETE SET NULL,
@@ -163,6 +182,8 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_scans_start ON scans(start_time);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_scans_repo ON scans(repo_path);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_events_ts ON events(timestamp);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_scan_id ON findings(scan_id);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_rule_id ON findings(rule_id);")
 
 
 def _append_jsonl(record: Dict[str, Any]) -> None:
@@ -282,6 +303,30 @@ def record_scan_results(scan_id: str, invoked_scanners: List[str], findings: Lis
                 "INSERT INTO scanner_metrics (scan_id, scanner_name, findings_count, critical_count, high_count, medium_count, low_count) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (scan_id, scanner_name, len(items), sev["critical"], sev["high"], sev["medium"], sev["low"]),
+            )
+
+        now = time.time()
+        for f in findings:
+            conn.execute(
+                "INSERT OR REPLACE INTO findings (finding_id, scan_id, rule_id, path, start_line, end_line, "
+                "matched_code, snippet, severity, exploitability, message, triage_status, ai_reasoning, timestamp) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    fingerprint(f),
+                    scan_id,
+                    f.get("rule_id", ""),
+                    f.get("path", ""),
+                    f.get("start_line"),
+                    f.get("end_line"),
+                    f.get("matched_code"),
+                    f.get("snippet"),
+                    f.get("severity"),
+                    f.get("exploitability"),
+                    f.get("message"),
+                    f.get("triage_status"),
+                    f.get("ai_reasoning"),
+                    now,
+                ),
             )
 
 
@@ -442,6 +487,24 @@ def get_repo_staleness() -> List[Dict[str, Any]]:
         }
         for r in rows
     ]
+
+
+def get_findings_by_scan_id(scan_id: str) -> List[Dict[str, Any]]:
+    """Findings recorded for one scan, with already-ignored ones (per the
+    scan's repo .vulnhunter-ignore.json, see ignore_store.py) filtered out."""
+    with _connect() as conn:
+        scan_row = conn.execute("SELECT repo_path FROM scans WHERE scan_id = ?", (scan_id,)).fetchone()
+        if scan_row is None:
+            return []
+        repo_path = scan_row["repo_path"]
+        rows = conn.execute(
+            "SELECT finding_id, scan_id, rule_id, path, start_line, end_line, matched_code, snippet, "
+            "severity, exploitability, message, triage_status, ai_reasoning, timestamp "
+            "FROM findings WHERE scan_id = ?",
+            (scan_id,),
+        ).fetchall()
+    findings = [dict(r) for r in rows]
+    return ignore_store.filter_ignored(repo_path, findings)
 
 
 def get_recent_events(limit: int = 30) -> List[Dict[str, Any]]:
