@@ -375,6 +375,168 @@ function ScanUrlBox() {
   );
 }
 
+type ScanDetails = {
+  id: string;
+  repoId: string;
+  status: string;
+};
+
+type GraphQLFinding = {
+  id: string;
+  title: string;
+  severity: string;
+};
+
+type GraphQLResult = {
+  data?: {
+    queryScan: ScanDetails | null;
+    findingsForScan: GraphQLFinding[];
+  };
+  errors?: any[];
+};
+
+function ScanDetailsPanel() {
+  const [scanIdInput, setScanIdInput] = useState("");
+  const [status, setStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
+  const [scanDetails, setScanDetails] = useState<ScanDetails | null>(null);
+  const [findings, setFindings] = useState<GraphQLFinding[]>([]);
+  const [error, setError] = useState("");
+
+  async function fetchScanDetails() {
+    if (!scanIdInput.trim() || status === "loading") return;
+    setStatus("loading");
+    setScanDetails(null);
+    setFindings([]);
+    setError("");
+
+    try {
+      const res = await fetch("/api/graphql", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          query: `
+            query GetScanDetailsAndFindings($scanId: ID!) {
+              queryScan(id: $scanId) {
+                id
+                repoId
+                status
+              }
+              findingsForScan(scanId: $scanId) {
+                id
+                title
+                severity
+              }
+            }
+          `,
+          variables: { scanId: scanIdInput.trim() },
+        }),
+      });
+
+      const result: GraphQLResult = await res.json();
+
+      if (!res.ok || result.errors) {
+        throw new Error(result.errors?.[0]?.message || "GraphQL query failed");
+      }
+
+      setScanDetails(result.data?.queryScan || null);
+      setFindings(result.data?.findingsForScan || []);
+      setStatus("done");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to fetch scan details");
+      setStatus("error");
+    }
+  }
+
+  const sevCount = (sev: string) => findings.filter((f) => f.severity.toLowerCase() === sev).length;
+
+  return (
+    <motion.div
+      layout
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.3 }}
+      style={{
+        background: COLOR.surface,
+        border: `1px solid ${COLOR.grid}`,
+        borderRadius: 10,
+        padding: "16px 18px",
+        boxShadow: "0 1px 0 rgba(255,255,255,0.03) inset, 0 8px 24px rgba(0,0,0,0.35)",
+        flex: "1 1 260px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 10,
+      }}
+    >
+      <div style={{ fontSize: 11, letterSpacing: 0.6, textTransform: "uppercase", color: COLOR.inkMuted }}>
+        Lookup scan by ID
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <input
+          value={scanIdInput}
+          onChange={(e) => setScanIdInput(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && fetchScanDetails()}
+          placeholder="Enter Scan ID (e.g., scan-abcdef)"
+          disabled={status === "loading"}
+          style={{
+            flex: 1,
+            background: COLOR.page,
+            border: `1px solid ${COLOR.grid}`,
+            borderRadius: 6,
+            padding: "8px 10px",
+            color: COLOR.ink,
+            fontSize: 13,
+            fontFamily: "monospace",
+          }}
+        />
+        <button
+          onClick={fetchScanDetails}
+          disabled={status === "loading" || !scanIdInput.trim()}
+          style={{
+            background: status === "loading" ? COLOR.grid : COLOR.seqBlue,
+            border: "none",
+            borderRadius: 6,
+            padding: "0 16px",
+            color: COLOR.ink,
+            fontSize: 13,
+            fontWeight: 600,
+            cursor: status === "loading" || !scanIdInput.trim() ? "default" : "pointer",
+          }}
+        >
+          Lookup
+        </button>
+      </div>
+
+      <div style={{ fontFamily: "monospace", fontSize: 12, minHeight: 18 }}>
+        {status === "idle" && <span style={{ color: COLOR.inkMuted }}>Enter a scan ID to view its details and findings.</span>}
+        {status === "loading" && (
+          <motion.span animate={{ opacity: [1, 0.4, 1] }} transition={{ duration: 1.2, repeat: Infinity }} style={{ color: COLOR.seqBlue }}>
+            &gt; fetching…
+          </motion.span>
+        )}
+        {status === "error" && <span style={{ color: COLOR.critical }}>&gt; {error}</span>}
+        {status === "done" && scanDetails ? (
+          <div>
+            <span style={{ color: COLOR.ink }}>Repo: {scanDetails.repoId}, Status: {scanDetails.status}</span>
+            {findings.length > 0 ? (
+              <span style={{ color: COLOR.ink }}>
+                <br />Total Findings: {findings.length} —{" "}
+                <span style={{ color: COLOR.critical }}>{sevCount("critical")} crit</span>,{" "}
+                <span style={{ color: COLOR.serious }}>{sevCount("high")} high</span>,{" "}
+                <span style={{ color: COLOR.warning }}>{sevCount("medium")} med</span>,{" "}
+                <span style={{ color: COLOR.good }}>{sevCount("low")} low</span>
+              </span>
+            ) : (
+              <span style={{ color: COLOR.inkMuted }}><br />No findings found for this scan.</span>
+            )}
+          </div>
+        ) : status === "done" && !scanDetails ? (
+          <span style={{ color: COLOR.inkMuted }}>&gt; Scan ID not found.</span>
+        ) : null}
+      </div>
+    </motion.div>
+  );
+}
+
 function ActiveScanBar({ scan }: { scan: ActiveScan }) {
   const pct = scan.progress_total > 0 ? Math.round((scan.progress_step / scan.progress_total) * 100) : 0;
   return (
@@ -495,6 +657,7 @@ export default function Dashboard() {
             color={successTone ? toneColor[successTone] : COLOR.inkMuted}
           />
           <ScanUrlBox />
+          <ScanDetailsPanel />
           <RadialGauge
             label="False-positive rate"
             value={summary?.fp_rate ?? 0}

@@ -1,6 +1,7 @@
 fastapi>=0.104.1
 uvicorn[standard]>=0.24.0
 pydantic>=2.5.0
+strawberry-graphql>=0.235.0
 python-dotenv>=1.0.0
 openai>=1.50.0
 semgrep>=1.90.0

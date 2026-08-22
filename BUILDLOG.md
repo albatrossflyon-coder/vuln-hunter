@@ -13,9 +13,54 @@ and fix suggestions.
 
 - **Languages**: Python, TypeScript
 - **Frameworks/Libraries**: FastAPI, Next.js, React, Tailwind CSS
-- **AI/ML**: Z.AI (triage/exploitability, current), Groq/Llama 3.3 70B (earlier fallback), MCP Protocol, GraphQL (strawberry-graphql, scaffold stage)
+- **AI/ML**: Z.AI (triage/exploitability, current), Groq/Llama 3.3 70B (earlier fallback), MCP Protocol, GraphQL (strawberry-graphql, live: query_repo/query_scan/findings_for_scan)
 - **Cloud/Hosting**: Vercel (frontend), Render (backend)
 - **Dev Tools**: Semgrep, Gitleaks, pip-audit, Trivy, pytest, Rich, Textual
+
+---
+
+## 2026-08-22 (TIC 2) — GraphQL feature merged to master
+
+`feature/graphql-scaffold` merged into `master` (`--no-ff`). The GraphQL layer described in the entries below (query_repo/query_scan/findings_for_scan, `require_scan_key` gate, frontend demo panel) is now on `master`, not just a feature branch. Resolved a Tech Stack merge conflict in this file in favor of the "live" wording below. Nothing else changed by this merge.
+
+---
+
+## 2026-08-21 12:20 AM CDT — GraphQL: auth gate + frontend demo panel, feature now end-to-end
+
+**Auth gate:** `/graphql` now behind `require_scan_key`, stricter than this codebase's existing pattern (read-only `/telemetry`/`/health` stay open) since all 3 resolvers are live and GraphQL invites future mutations. Verified with a real `TestClient`: no key → 401, wrong key → 401, right key → 200 and reaches the resolver, `/health` unaffected.
+
+**Frontend:** new "Lookup Scan by ID" panel on the dashboard (`frontend/app/dashboard/page.tsx`), querying `queryScan` + `findingsForScan` in one round trip through a new `frontend/app/api/graphql/route.ts` server-side proxy (same `SCAN_API_KEY`-off-the-browser pattern as the existing `scan-url/route.ts`). Caught one real bug before implementation: Hermes' plan used snake_case (`repo_id`, `scan_id`) but Strawberry's live schema is camelCase (`repoId`, `findingsForScan(scanId:...)`) — confirmed directly via `schema.schema.as_str()`, corrected before Claude Code implemented it.
+
+**Verified for real:** ran both dev servers locally, hit the proxy route with `curl` against a real `scan_id`, then did an actual browser click-through (chrome-devtools-mcp) confirming the panel renders and shows real data. `scan_diff` clean on both diffs.
+
+**GraphQL feature is now functionally complete end-to-end** (backend + gate + frontend). Not done: merge to `master` (holding pending review).
+
+---
+
+## 2026-08-20 11:14 PM CDT — GraphQL scaffold → all 3 resolvers live, via a real 3-agent herdr handoff (2 phases)
+
+**Phase 1 — query_repo/query_scan:** wired to real data — `query_repo` scans `telemetry.get_repo_staleness()` for a matching `repo_path`; `query_scan` runs a direct SQL lookup against the `scans` table via `telemetry._connect()` (no existing `get_scan_by_id` helper to reuse — confirmed by listing every function in `telemetry.py` before writing new SQL).
+
+**Phase 2 — findings_for_scan:** the real gap phase 1 found (no persistent per-finding storage keyed by `scan_id`, only aggregated `scanner_metrics` counts) is now closed. Added a `findings` table to `init_db()` (PK `finding_id` = the same `fingerprint()` `ignore_store.py` already uses, FK `scan_id → scans.scan_id ON DELETE CASCADE`, indexes on `scan_id`/`rule_id`). `record_scan_results()` now `INSERT OR REPLACE`s each finding into it alongside its existing `scanner_metrics` aggregation. New `telemetry.get_findings_by_scan_id(scan_id)` joins to `scans` for `repo_path` and runs results through `ignore_store.filter_ignored()` before returning, so already-ignored findings don't leak into the GraphQL view. `findings_for_scan` calls it and maps `message` (falling back to `rule_id`) to `Finding.title`, `severity` (falling back to `exploitability`) to `Finding.severity` — precedence documented inline since the plan flagged both as genuinely ambiguous. `require_scan_key` gating still deliberately untouched — same reasoning as phase 1, no new attack surface opened by these reads.
+
+**Process note:** both phases built via a real 3-agent herdr session (Claude Code + Pi/omp + Hermes, all in WSL2, workspace pointed at this repo on `feature/graphql-scaffold`) — Hermes wrote both `PLAN_GRAPHQL.md` (phase 1) and `PLAN_GRAPHQL_PHASE2.md` (the findings-table design), Claude Code implemented against each plan rather than re-deriving it; Pi produced `BACKLOG_SCAN.md` (16 other real, sourced gaps — see below) once its CLIProxyAPI routing was actually working. Real infra issues hit and fixed along the way (unrelated to the GraphQL work itself, logged in `herdr.md`): a WSL2 `.bashrc` PATH-clobbering bug had silently broken `hermes`/`omp` on PATH; Pi's original Z.AI key turned out to have no active coding plan (429→529 errors); several CLIProxyAPI model IDs were deprecated/quota-capped/incompatible with Hermes' auto-sent `reasoning_effort` param before landing on working combos (`gemini-2.5-flash` for Hermes; Pi's `omp` never actually got a working custom-provider route despite several attempts — real open item, see `herdr.md`).
+
+**Verified before calling it done:**
+- `vuln-hunter scan_diff` on both diffs: 0 findings on `backend/schema.py` or the new `backend/telemetry.py` code. One pre-existing finding surfaced in `telemetry.py` (`_push_remote`'s `urllib.request.urlopen` call, line ~77, no scheme validation) — well outside anything either diff touched, a genuine design tradeoff (validating a scheme on an internal self-configured mirror URL) rather than a mechanical fix, so flagged here rather than silently changed. The other 5 findings both scans surfaced are pre-existing content in the untracked stray `vuln-hunter/` nested folder (already flagged as a known cleanup item in the 2026-08-06 entry below) — unrelated to this change.
+- Direct reuse/simplification review against `telemetry.py`'s real function list both times: clean, no existing helper missed, no unnecessary complexity added.
+- Real functional smoke tests against the live SQLite DB (not synthetic), including phase 2's full round trip: inserted a real finding via `record_scan_results()`, confirmed it comes back correctly through `get_findings_by_scan_id()` (with `ignore_store.filter_ignored()` applied) and through the `findings_for_scan` GraphQL resolver with correct title/severity mapping; confirmed a nonexistent `scan_id` returns `[]` cleanly; test rows cleaned up afterward, no pollution of the real DB. `strawberry-graphql` was in `requirements.txt` from the original scaffold commit but was never actually installed in `venv` until this session — fixed as part of running phase 1's smoke test.
+
+**Not done / explicitly deferred:** `require_scan_key` gating for `/graphql` once real data access exists there (still not needed today — everything exposed is already-public telemetry). Pi's `omp` custom-provider routing through CLIProxyAPI — real open item, needs `omp`'s actual docs, not more guessing.
+
+**Also produced this session (separate from GraphQL):** `BACKLOG_SCAN.md` (repo root) — 16 other real, sourced (not speculative) gaps pulled from this file and `LEARNINGS.md`, written by the same herdr session's Claude Code agent.
+
+---
+
+## 2026-08-18 11:18 PM CDT — Groq→Z.AI triage swap + GraphQL scaffold: committed, self-scan verified before push
+
+**What shipped:** `backend/triage.py` primary LLM moved off Groq (deprecated the prior model with no warning, replacement's free tier capped too tight for real scans) onto Z.AI (`glm-4.7-flash`); Groq demoted to first fallback (`gpt-oss-120b`) rather than dropped. `_call_with_retry` now catches non-rate-limit `APIStatusError`s (e.g. a deprecated/renamed model) and falls through to the fallback chain instead of crashing outright — this exact gap is what caused the Groq deprecation to break the live scan pipeline in the first place. Also added `backend/schema.py`, a Strawberry GraphQL scaffold (types/resolvers stubbed, TODOs point at real data sources), wired into `main.py` at `/graphql` — output of a real Pi↔Claude Code multi-agent handoff test (Pi wrote the plan, Claude Code implemented it) on branch `feature/graphql-scaffold`.
+
+**Verified before trusting the triage.py change:** rather than assume the swap didn't break the scanner, ran a real `scan_repo` against a freshly-cloned external target (`duolahypercho/codex-router`, cloned to `reference-repos/` per the New Repo Security Scan Rule) through the live MCP tool — i.e. the actual code path that now hits Z.AI instead of Groq. Came back clean (no error, no timeout) with 15 real findings (13 `detect-child-process` command-injection-pattern warnings in the target's installer scripts, 1 dependency CVE, one flagged high-exploitability with a concrete suggested fix) — confirms the scanner itself is still functioning correctly post-change, not just that the code imports cleanly. Committed `48809f4` on `feature/graphql-scaffold`, not yet pushed as of this entry.
 
 ---
 

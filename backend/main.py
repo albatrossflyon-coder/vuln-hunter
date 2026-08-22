@@ -16,11 +16,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from strawberry.fastapi import GraphQLRouter
+
 import all_scanners
 import ignore_store
 import telemetry
 from sarif import to_sarif
 from scanner import get_changed_files
+from schema import schema as graphql_schema
 
 # Only http(s) git URLs -- this box runs on your own machine against your own
 # git binary, so it's equivalent to typing `git clone <url>` yourself. This
@@ -37,7 +40,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 def require_scan_key(x_api_key: str | None = Header(default=None)):
     """Gate the scan-triggering endpoints behind SCAN_API_KEY. Unset locally
     on purpose -- local dev/CLI use stays frictionless. Only the hosted
@@ -47,6 +49,17 @@ def require_scan_key(x_api_key: str | None = Header(default=None)):
     expected = os.getenv("SCAN_API_KEY")
     if expected and x_api_key != expected:
         raise HTTPException(status_code=401, detail="Missing or invalid X-API-Key")
+
+
+# All 3 resolvers are live now (see schema.py) and read-only over telemetry
+# data that's also exposed unauthenticated via /telemetry/* -- gated behind
+# require_scan_key anyway, stricter than that existing pattern, since GraphQL
+# invites future mutations and locking it down now costs nothing today.
+app.include_router(
+    GraphQLRouter(graphql_schema),
+    prefix="/graphql",
+    dependencies=[Depends(require_scan_key)],
+)
 
 
 class ScanRequest(BaseModel):
