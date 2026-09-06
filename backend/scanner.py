@@ -9,6 +9,7 @@ import fnmatch
 import json
 import subprocess
 import sys
+import os
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -114,14 +115,50 @@ def run_scan(target_path: str, configs: List[str] | None = None, files: List[str
         # large vendor/generated dirs (found live on kungfu-systems/kungfu).
         cmd += ["--exclude", dirname]
     cmd += files if files is not None else [target_path]
-    cmd += ["--json", "--quiet", "--timeout", "30"]
+    internal_timeout = os.getenv("SEMGREP_INTERNAL_TIMEOUT", "30")
+    cmd += ["--json", "--quiet", "--timeout", str(internal_timeout)]
 
     # stdin=DEVNULL: semgrep must never block waiting on stdin when spawned
     # from an MCP server, which may leave its own stdin in an odd state.
+    proc_timeout = int(os.getenv("SEMGREP_PROCESS_TIMEOUT", "1800"))
     try:
-        result = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=1800)
-    except subprocess.TimeoutExpired:
-        raise RuntimeError("semgrep scan exceeded the 1800s timeout — repo is likely too large for a single-pass scan")
+        result = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=proc_timeout)
+    except subprocess.TimeoutExpired as e:
+        # semgrep timed out; attempt to parse any partial JSON it emitted and
+        # return those findings rather than silently truncating. Also append a
+        # synthetic finding to make the timeout explicit to the caller/UI.
+        partial_stdout = getattr(e, "stdout", None)
+        payload = None
+        if partial_stdout:
+            try:
+                payload = json.loads(partial_stdout)
+            except Exception:
+                payload = None
+
+        findings = []
+        if payload and "results" in payload:
+            for item in payload.get("results", []):
+                if _is_never_read(Path(item["path"])):
+                    continue
+                findings.append(_enrich_with_source(item))
+
+        # Explicit, surfaced timeout indication so callers (and MCP clients)
+        # don't silently treat partial output as a full scan. Prefer returning
+        # partial, actionable findings over failing with no data.
+        findings.append({
+            "rule_id": "semgrep.timeout",
+            "path": str(target_path),
+            "start_line": 0,
+            "end_line": 0,
+            "message": f"semgrep process exceeded the {proc_timeout}s timeout; returning partial results",
+            "severity": "LOW",
+            "cwe": None,
+            "owasp": None,
+            "snippet": "",
+            "matched_code": "",
+        })
+
+        return findings
     if result.returncode not in (0, 1):  # semgrep exits 1 when findings exist
         raise RuntimeError(f"semgrep failed: {result.stderr[:2000]}")
 

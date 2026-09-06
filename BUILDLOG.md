@@ -647,3 +647,19 @@ Chris flagged live, using the real dashboard against real scans (dalfox, testspr
 - [ ] Extend custom rules beyond Python (JS/TS at minimum, given the frontend-dev angle)
 - [ ] Wire `deep_review` into the frontend (currently API-only; diff-scan itself has no frontend UI yet either — dashboard only calls whole-repo `/scan`)
 - [ ] Decide whether to merge ponytail-style code cleanup into vuln-hunter for a sellable product — recommended AGAINST a single merged tool (security detection and cleanup are different judgment calls); a two-product/two-mode suite is the likelier path if pursued
+
+---
+
+## 2026-09-05 20:43 CDT — Fix semgrep timeout in MCP scan_repo (shipped)
+- **What broke:** `run_scan()` raised `RuntimeError` on `subprocess.TimeoutExpired`, so any semgrep process timeout returned zero findings. This is the recurring "vuln-hunter scan came back empty on a large repo" failure.
+- **Root cause:** the timeout was treated as a fatal error instead of a partial result. Semgrep writes valid JSON for the rules it finished before the deadline, and that output (`e.stdout`) was being discarded.
+- **Fix (backend/scanner.py):**
+  - Both timeouts are now env-configurable: `SEMGREP_INTERNAL_TIMEOUT` (per-rule, default "30"), `SEMGREP_PROCESS_TIMEOUT` (whole process, default "1800").
+  - On `TimeoutExpired`, parse semgrep's partial JSON, enrich those results the same way as a normal scan, append a synthetic `{"rule_id": "semgrep.timeout", severity: "LOW", ...}` marker so the caller/UI knows the scan was partial, and `return findings` instead of raising.
+  - The synthetic finding carries `cwe: None` / `owasp: None` for schema parity with `_enrich_with_source()` output, so a downstream `finding["cwe"]` lookup does not KeyError on the timeout path.
+- **Scan (step 3):** `semgrep --config p/security-audit --config p/secrets` on `backend/scanner.py` — 0 findings, 0 errors. Manual over-engineering read of the ~40-line diff: minimal, no new abstractions.
+- **Test (step 4):** no pytest suite in this repo (venv has no pytest; tests are `test_*_manual.py` scripts). Ran an inline check of the fixed path: `subprocess.run` monkeypatched to raise `TimeoutExpired` with partial JSON — `run_scan()` returns the partial finding plus the `semgrep.timeout` marker, and the marker's key set now equals a real enriched finding's key set (parity assertion passes; would have failed before the cwe/owasp addition). Regression: `test_never_read_manual.py` and `test_exclude_dirs_manual.py` still PASS (normal scan path unchanged).
+- **Files changed:** backend/scanner.py, BUILDLOG.md, LEARNINGS.md.
+- **Status:** shipped. NOTE: the running vuln-hunter MCP server does not hot-reload — a server/session restart is required for the live MCP `scan_repo`/`scan_diff` tools to pick up this change.
+
+---
