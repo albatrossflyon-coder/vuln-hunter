@@ -19,6 +19,31 @@ and fix suggestions.
 
 ---
 
+## 2026-09-07 (TIC 1) — telemetry must not break a scan: langfuse fail-open
+
+**Bug:** a full scan via `cli.py scan` died with
+`requests.exceptions.ConnectionError` to `localhost:3000` — `triage.py` calls
+`langfuse.get_client()`, which picks up a `LANGFUSE_BASE_URL` env var set on the
+machine for another app (nanobot's self-hosted langfuse). With that langfuse
+instance down, the OTel span exporter raised and the exception propagated out of
+`_call_with_retry`, killing the scan with zero findings. Same class as the
+`b24a2dd` semgrep-timeout fix: a side channel's failure must never break the
+core function.
+
+**Fix (`backend/triage.py`):** new `_triage_observation()` context manager wraps
+the langfuse generation span fail-open — guards both span creation and the flush
+on close (the flush can raise well after the LLM call already succeeded); yields
+`None` and logs a warning when tracing is unavailable.
+`_update_generation_from_completion` and the error-path `generation.update(...)`
+now no-op on a `None` generation. No change to scanning logic.
+
+**Test:** `backend/test_triage_langfuse_manual.py` — monkeypatches `get_client`
+to raise, asserts `_triage_observation` yields `None` and the completion helper
+tolerates it. Passes. Smoke: `cli.py scan <file>` now completes with the
+langfuse env vars still set + the endpoint down.
+
+---
+
 ## 2026-08-22 (TIC 2) — GraphQL feature merged to master
 
 `feature/graphql-scaffold` merged into `master` (`--no-ff`). The GraphQL layer described in the entries below (query_repo/query_scan/findings_for_scan, `require_scan_key` gate, frontend demo panel) is now on `master`, not just a feature branch. Resolved a Tech Stack merge conflict in this file in favor of the "live" wording below. Nothing else changed by this merge.

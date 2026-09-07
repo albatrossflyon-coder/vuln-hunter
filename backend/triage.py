@@ -4,7 +4,9 @@ false-positive problem this tool exists to avoid. Every finding passed in here
 already came from a rule match against real source code.
 """
 
+import contextlib
 import json
+import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -13,6 +15,29 @@ from typing import Any, Dict, List
 import openai
 from langfuse import get_client
 from openai import OpenAI
+
+logger = logging.getLogger(__name__)
+
+
+@contextlib.contextmanager
+def _triage_observation(**kwargs):
+    """Langfuse generation span for one triage call, fail-open. Telemetry must
+    never break a scan: if langfuse is misconfigured or its endpoint is
+    unreachable (e.g. a stale LANGFUSE_BASE_URL inherited from another app on
+    the same machine), yield None and let triage run untraced. Both span
+    creation and the flush on span close are guarded -- the flush can raise a
+    ConnectionError well after the LLM call already succeeded."""
+    try:
+        cm = get_client().start_as_current_observation(as_type="generation", **kwargs)
+    except Exception as exc:  # noqa: BLE001 -- any langfuse/OTel failure is non-fatal here
+        logger.warning("langfuse tracing disabled for this call: %s", exc)
+        yield None
+        return
+    try:
+        with cm as generation:
+            yield generation
+    except Exception as exc:  # noqa: BLE001 -- swallow a failed span flush; the scan result stands
+        logger.warning("langfuse telemetry error ignored: %s", exc)
 
 # ponytail: routed off Anthropic's paid API (2026-08-10, ANTHROPIC_API_KEY
 # ran out of credits -- same key job-hunter hit 2026-08-09) onto Groq's free
@@ -73,7 +98,9 @@ def _update_generation_from_completion(generation, response, *, model: str) -> N
     """Map an OpenAI-style ChatCompletion response onto the active Langfuse
     generation. Shared by the primary call and every fallback-provider retry
     so usage/output reporting is consistent regardless of which provider
-    actually served the request."""
+    actually served the request. No-op when tracing is disabled."""
+    if generation is None:
+        return
     content = None
     if response.choices:
         content = response.choices[0].message.content
@@ -93,9 +120,7 @@ def _call_with_retry(client: OpenAI, max_attempts: int = 5, **kwargs):
     one. The SDK's built-in retries aren't enough on their own once several
     concurrent workers are all backed up on the same per-minute budget, so
     retry explicitly with backoff long enough for the window to clear."""
-    langfuse = get_client()
-    with langfuse.start_as_current_observation(
-        as_type="generation",
+    with _triage_observation(
         name="vuln-hunter-triage",
         model=kwargs.get("model"),
         input=kwargs.get("messages"),
@@ -138,7 +163,8 @@ def _call_with_retry(client: OpenAI, max_attempts: int = 5, **kwargs):
                 return response
             except Exception:
                 continue
-        generation.update(level="ERROR", status_message=str(last_error) if last_error else "all providers exhausted")
+        if generation is not None:
+            generation.update(level="ERROR", status_message=str(last_error) if last_error else "all providers exhausted")
         raise last_error
 
 
