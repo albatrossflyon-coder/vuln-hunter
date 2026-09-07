@@ -19,6 +19,34 @@ and fix suggestions.
 
 ---
 
+## 2026-09-07 (TIC 2) -- CLI: ignore-list management for agent/roster use
+
+**Why:** the herdr VPS roster drives vuln-hunter over the CLI, and `cli.py`
+exposed only `scan` / `diff`, half the MCP tool surface. `ignore_finding` and
+`list_ignored` had no CLI equivalent, and `ignore_store.remove_ignore` had no
+caller anywhere (no MCP tool, no CLI).
+
+**Change (`backend/cli.py`, +43/-6):** three new argparse subcommands wired to
+the same `ignore_store` functions the MCP tools call:
+- `ignore <repo_path> <fingerprint> [--rule-id] [--path] [--reason]` → `add_ignore`
+- `unignore <repo_path> <fingerprint>` → `remove_ignore` (exit 1 if not present)
+- `list-ignored <repo_path> [--json]` → `load_ignored`
+
+`scan` / `diff` behaviour unchanged (the `_print_findings` call moved inside each
+branch since the new subcommands print their own output). Module docstring's
+`ponytail:` note updated: the "add if a real need shows up" case showed up.
+
+**Test:** manual run of all three (help, empty list, add, list plain + `--json`,
+remove-hit exit 0, remove-miss exit 1, store file back to `{}`). Existing `scan`
+path re-verified earlier this session (pi-mcp-adapter scan).
+
+**Not touched:** CLI-Anything was evaluated for this and rejected: its HARNESS.md
+methodology is GUI-app-to-CLI (hard dependency on external software like
+GIMP/Blender, "use when no native CLI exists"), which doesn't fit a Python
+scanner that is itself the implementation and already has a CLI.
+
+---
+
 ## 2026-09-07 (TIC 1) — telemetry must not break a scan: langfuse fail-open
 
 **Bug:** a full scan via `cli.py scan` died with
