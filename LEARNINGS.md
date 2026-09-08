@@ -46,3 +46,4 @@ The actual evidence trail. One line every time Step 1 checks this file:
 
 - 2026-08-12 — file created, seeded with 6 real entries pulled from actual session history (not hypothetical) — first real check happens next time `start-to-finish` runs against this repo.
 - 2026-09-05 — checked | hit: the 2026-07-23 "semgrep 300s hardcoded timeout, silent fail" entry — confirmed this was exactly the bug being fixed (timeout raised RuntimeError => empty scan), updated the entry to reflect the new partial-results behavior.
+- 2026-09-08 — checked | miss: no langfuse/telemetry entry. Task was "cli.py exits 1 when langfuse localhost:3000 unreachable" — turned out already fixed in dfa4208 (2026-09-07, on origin/master); only gap was the manual test not covering the flush-on-close path. The 2026-09-05 semgrep-timeout entry is the same class (an infra side-channel must not zero the scan) but didn't name this specific failure.
