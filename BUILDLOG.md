@@ -19,6 +19,22 @@ and fix suggestions.
 
 ---
 
+## 2026-09-08 (TIC 2) — langfuse fail-open: test the flush-on-close guard
+
+**Context:** revisited after CC memory `todo-vuln-hunter-langfuse-telemetry-kills-scan` read as still-open (its MEMORY.md index line was never marked FIXED). It was fixed 2026-09-07 in `dfa4208` and is on `origin/master` (`8694bcf`) — re-verified: local == origin HEAD, `dfa4208` an ancestor. Both failure paths re-confirmed working by monkeypatching `triage.get_client`: (1) span creation raises `ConnectionError` → `_triage_observation` yields `None`, scan continues; (2) span flush raises on close (well after the LLM call returned) → swallowed, scan result stands.
+
+**Gap found:** `backend/test_triage_langfuse_manual.py` only exercised path (1). The flush-on-close guard (`triage.py`'s inner `try/except` around `with cm as generation`) had no test, so it could regress silently.
+
+**Change (`backend/test_triage_langfuse_manual.py`, test-only):** added `_flush_boom_client` — a fake client whose observation context manager raises in `__exit__` — and a second scenario asserting `_triage_observation` still exits cleanly. No production code touched.
+
+**Scan:** semgrep `p/python` + `p/security-audit` on the changed file — 0 findings (exit 0).
+
+**Test:** `python test_triage_langfuse_manual.py` → both scenarios PASS ("fails open when langfuse span creation is unreachable", "swallows a failed span flush after the call succeeds"). No pytest suite in this repo (see LEARNINGS 2026-09-05); the manual scripts are the suite.
+
+**Status:** committed + pushed (SHA in the commit / next line). Also cleared the stale `todo-` CC memory (archived to `MEMORY-archive.md`, removed the misleading MEMORY.md index line).
+
+---
+
 ## 2026-09-07 (TIC 2) -- CLI: ignore-list management for agent/roster use
 
 **Why:** the herdr VPS roster drives vuln-hunter over the CLI, and `cli.py`
