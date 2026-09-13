@@ -2,6 +2,14 @@
 
 **Repo**: C:\Repos\vuln-hunter | github.com/albatrossflyon-coder/vuln-hunter (public)
 
+## 2026-09-13 11:42 AM CDT (TIC 1) — added vulnometry for post-scan triage
+
+`vulnometry` (san3ncrypt3d/vulnometry, 56 stars, Apache-2.0) added to `backend/requirements.txt` and installed into `backend/venv`. Turns raw scan findings into business-prioritized action items (Threat x Reachability x Consequence, not severity alone), reads `results.sarif` natively, no code changes needed on vuln-hunter's side. Verified: `vulnometry --version` (0.3.1), `vulnometry doctor` confirmed all 5 feeds reachable (nvd/epss/cisa-kev/osv/ghsa). Evaluated from a 5-AI tool brainstorm, scanned clean via semgrep (0 real findings, only CI-workflow mutable-tag noise in an example file).
+
+**Not yet done:** an actual `vulnometry import results.sarif` run against a real vuln-hunter scan output (no existing `results.sarif` found on disk to test against this session) — first real scan after this lands should be run through it to confirm the integration end-to-end. No asset inventory configured yet either (`vulnometry inventory init`), so findings currently score pessimistically by default.
+
+**Status:** installed, requirements.txt updated, not committed/pushed yet.
+
 AI-assisted security code reviewer. Hybrid architecture: real static analysis
 (Semgrep) for ground-truth vulnerability detection, an LLM (currently Groq /
 Llama 3.3 70B, see 2026-08-10 entry) for triage, exploitability assessment,
@@ -730,5 +738,15 @@ Chris flagged live, using the real dashboard against real scans (dalfox, testspr
 - **Test (step 4):** no pytest suite in this repo (venv has no pytest; tests are `test_*_manual.py` scripts). Ran an inline check of the fixed path: `subprocess.run` monkeypatched to raise `TimeoutExpired` with partial JSON — `run_scan()` returns the partial finding plus the `semgrep.timeout` marker, and the marker's key set now equals a real enriched finding's key set (parity assertion passes; would have failed before the cwe/owasp addition). Regression: `test_never_read_manual.py` and `test_exclude_dirs_manual.py` still PASS (normal scan path unchanged).
 - **Files changed:** backend/scanner.py, BUILDLOG.md, LEARNINGS.md.
 - **Status:** shipped. NOTE: the running vuln-hunter MCP server does not hot-reload — a server/session restart is required for the live MCP `scan_repo`/`scan_diff` tools to pick up this change.
+
+---
+
+## 2026-09-13 4:15 PM CDT — Fix vuln-hunter's own MCP server crash (backoff missing)
+
+- **What broke:** the `vuln-hunter` MCP server (`backend/mcp_server.py`, wrapped by jmunch-mcp per `~/.jmunch/configs/vuln-hunter.toml`) was showing `CONNECT_TIMEOUT` in Claude Code all session. Root cause: earlier the same session, `pip install --force-reinstall semgrep==1.168.0` (to fix a broken semgrep dependency chain) silently evicted the `backoff` package from `backend/venv` as a side effect of resolving semgrep's own dependencies. `backoff` is required by `langfuse`, which `triage.py` imports at module load time via `business_logic.py` -> `all_scanners.py` -> `mcp_server.py`, so the server crashed on every launch attempt with `ModuleNotFoundError: No module named 'backoff'` before it could ever open its stdio connection — that's what Claude Code saw as a connection timeout, not a network/Langfuse-server issue.
+- **Fix:** `backend/venv/Scripts/python.exe -m pip install backoff` (installed 2.2.1). No code change.
+- **Verify:** ran `mcp_server.py` directly — import chain completes cleanly (only a harmless `pydantic_settings` warning), process sits waiting on stdio as expected instead of crashing. Confirmed live in-session: `mcp__vuln-hunter__scan_repo` etc. became available and a real scan (`scan_repo` on this repo) returned 25 real findings.
+- **Files changed:** none in-repo (venv-only fix). Flagging here since `requirements.txt`/`BUILDLOG.md` from the vulnometry work earlier tonight are still local-only — this venv fix predates that commit and should be verified still holds after that commit lands.
+- **Status:** shipped, live-verified same session. Open watch item: the earlier `pip install --force-reinstall semgrep` downgraded this venv's `mcp` package 1.29.0 -> 1.23.3 — not yet independently reconfirmed whether that has any other effect now that `backoff` is back.
 
 ---

@@ -16,3 +16,8 @@ rich>=13.7.0
 
 # dev/test only
 jsonschema>=4.25.0
+
+# post-scan triage: turns results.sarif into business-prioritized findings
+# (Threat x Reachability x Consequence), not just severity. `vulnometry import
+# results.sarif` after a scan. Evaluated + scanned clean 2026-09-13.
+vulnometry>=0.3.1
