@@ -87,6 +87,26 @@ def review_file(file_path: str, model: str = TRIAGE_MODEL) -> List[Dict[str, Any
             {"role": "user", "content": f"File: {path.name}\n\n{numbered}"},
         ],
     )
+
+    # If first response is None or has no choices, retry once
+    if response is None or not response.choices:
+        response = _call_with_retry(
+            client,
+            model=model,
+            max_tokens=1200,
+            temperature=0,
+            timeout=60.0,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": f"File: {path.name}\n\n{numbered}"},
+            ],
+        )
+
+    # If still no valid response, return empty -- one file's LLM failure
+    # must never discard findings from other files.
+    if response is None or not response.choices:
+        return []
+
     text = (response.choices[0].message.content or "").strip()
     items = _parse_json_array(text)
 

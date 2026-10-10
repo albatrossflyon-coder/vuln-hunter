@@ -221,6 +221,7 @@ def triage_finding(finding: Dict[str, Any], model: str = TRIAGE_MODEL) -> Dict[s
         f"Source snippet (line numbers as in file):\n{finding['snippet']}"
     )
 
+    # Handle empty responses: retry once, then fall back to unknown
     response = _call_with_retry(
         client,
         model=model,
@@ -233,7 +234,26 @@ def triage_finding(finding: Dict[str, Any], model: str = TRIAGE_MODEL) -> Dict[s
             {"role": "user", "content": user_message},
         ],
     )
-
+    
+    # If first response is empty or has no choices, retry once
+    if response is None or not response.choices:
+        response = _call_with_retry(
+            client,
+            model=model,
+            max_tokens=1200,
+            temperature=0,
+            timeout=60.0,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+        )
+    
+    # If still no valid response, return finding with unknown exploitability
+    if response is None or not response.choices:
+        return {**finding, "exploitability": "unknown", "explanation": "", "suggested_fix": "", "finding_type": "rule_confirmed"}
+    
     text = (response.choices[0].message.content or "").strip()
     parsed = _parse_json_response(text)
 
