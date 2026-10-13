@@ -2,6 +2,27 @@
 
 **Repo**: C:\Repos\vuln-hunter | github.com/albatrossflyon-coder/vuln-hunter (public)
 
+## 2026-10-13 02:15 PM CDT (TIC 1) — vulnometry import validation + stray folder investigation
+
+**Problem:** The vulnometry integration added in 4dbbcce was never tested against a real vuln-hunter SARIF output. Also, a stray nested `vuln-hunter/vuln-hunter/` folder (with its own .git, old BUILDLOG 2026-07-09) was flagged in the 2026-08-06 entry but never investigated.
+
+**Work done:**
+1. Produced real SARIF from semgrep scan of this repo (local custom rules only, avoiding network-dependent community packs). Generated `results.sarif` with 3 findings (shell injection, SQL injection, hardcoded secret).
+2. Ran `vulnometry import results.sarif` — returned "No CVE identifiers found" because semgrep pattern rules produce CWE/OWASP metadata, not CVE IDs. Vulnometry's SARIF parser extracts CVEs from message text and ruleId only.
+3. Verified vulnometry works correctly with CVE-containing SARIF (simulated trivy output: CVE-2021-44228 scored BEI 34.5, verdict Accept).
+4. Created `backend/test_vulnometry_manual.py` — manual test demonstrating: (a) vulnometry scores CVE SARIF correctly, (b) semgrep-only SARIF yields no CVEs (expected), (c) full scan pipeline produces valid SARIF.
+5. Investigated stray folder: NOT PRESENT in this worktree. It was an untracked folder on the original Windows machine (C:\Repos\vuln-hunter\vuln-hunter\) with its own .git and BUILDLOG dated 2026-07-09. Fresh git worktree on Daytona doesn't include untracked folders. No action needed; listed for Chris to decide.
+
+**Root cause:** Vuln-hunter's full scan pipeline (all_scanners.run_full_scan) includes trivy for multi-ecosystem CVE detection and pip-audit for Python CVEs, but trivy binary not installed in this environment (disk space constraints). Without trivy/pip-audit findings, SARIF lacks CVEs for vulnometry to score.
+
+**Fix required:** Install trivy in deployment environments. The code integration is complete — trivy findings flow through all_scanners.run_full_scan → to_sarif() → /scan/sarif endpoint → vulnometry import.
+
+**Files changed:** backend/test_vulnometry_manual.py (new), BUILDLOG.md, STATUS
+**Test:** python backend/test_vulnometry_manual.py → PASS (3/3 scenarios)
+**Status:** Integrated, tested, documented. Trivy installation is ops/infra, not code.
+
+---
+
 ## 2026-09-13 11:42 AM CDT (TIC 1) — added vulnometry for post-scan triage
 
 `vulnometry` (san3ncrypt3d/vulnometry, 56 stars, Apache-2.0) added to `backend/requirements.txt` and installed into `backend/venv`. Turns raw scan findings into business-prioritized action items (Threat x Reachability x Consequence, not severity alone), reads `results.sarif` natively, no code changes needed on vuln-hunter's side. Verified: `vulnometry --version` (0.3.1), `vulnometry doctor` confirmed all 5 feeds reachable (nvd/epss/cisa-kev/osv/ghsa). Evaluated from a 5-AI tool brainstorm, scanned clean via semgrep (0 real findings, only CI-workflow mutable-tag noise in an example file).

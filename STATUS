@@ -1,0 +1,4 @@
+200 PROGRESS: Starting work on vuln-hunter card 200 - vulnometry import and stray folder
+200 PROGRESS: Generated SARIF from semgrep scan (local rules only). vulnometry import returns 'No CVE identifiers found' because semgrep rules produce CWE/OWASP not CVEs. Need trivy or pip-audit findings with CVE IDs for vulnometry to work. Trivy not installable due to disk space.
+200 PROGRESS: Created test_vulnometry_manual.py demonstrating vulnometry works with CVE SARIF but semgrep-only SARIF has no CVEs. Need trivy for full integration.
+200 PROGRESS: Stray nested vuln-hunter/vuln-hunter folder: NOT PRESENT in this worktree. Per BUILDLOG.md line 253, it was an untracked folder on the original machine (C:\Repos\vuln-hunter) with its own .git and old BUILDLOG dated 2026-07-09. Since this is a fresh git worktree on Daytona, the untracked folder was not cloned. Listed for Chris to decide - no action needed here.
