@@ -1,17 +1,20 @@
 """FastAPI server: POST /scan {repo_path} -> triaged security findings."""
 
+import math
 import os
 import re
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent / ".env")
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -49,6 +52,96 @@ def require_scan_key(x_api_key: str | None = Header(default=None)):
     expected = os.getenv("SCAN_API_KEY")
     if expected and x_api_key != expected:
         raise HTTPException(status_code=401, detail="Missing or invalid X-API-Key")
+
+
+_SCAN_RATE_WINDOW_SECONDS = 3600.0
+
+
+class _SlidingWindowLimiter:
+    """In-memory sliding-window counter, one bucket list per key.
+
+    ponytail note -- this state is process-local on purpose: Render runs a
+    single instance, so one dict is the whole world and stdlib is enough. The
+    ceiling is that it counts per process -- scale to N instances and the
+    effective cap becomes N x SCAN_RATE_LIMIT_PER_HOUR (and a redeploy resets
+    every window). Move to a shared store (Redis/DB) only if vuln-hunter ever
+    runs more than one instance; with one instance a 1-hour window makes the
+    reset-on-restart loss harmless.
+    """
+
+    def __init__(self) -> None:
+        self._hits: dict[str, list[float]] = {}
+        self._lock = threading.Lock()
+        self._last_sweep = 0.0
+
+    def record(self, buckets: list[str], limit: int) -> int:
+        """Charge one request to every bucket; 0 = allowed (hit recorded),
+        otherwise the Retry-After in seconds. All-or-nothing: if any bucket is
+        already full, nothing is recorded, so a refused request never eats
+        quota from a bucket that still had room."""
+        now = time.monotonic()
+        with self._lock:
+            # Sweep at most once a minute: bounds the dict against a caller
+            # rotating X-Forwarded-For / API keys to mint fresh buckets.
+            if now - self._last_sweep > 60.0:
+                self._last_sweep = now
+                cutoff = now - _SCAN_RATE_WINDOW_SECONDS
+                self._hits = {k: ts for k, ts in self._hits.items() if ts and ts[-1] > cutoff}
+
+            windows = {}
+            retry = 0
+            for bucket in buckets:
+                hits = [t for t in self._hits.get(bucket, ()) if now - t < _SCAN_RATE_WINDOW_SECONDS]
+                windows[bucket] = hits
+                if len(hits) >= limit:
+                    retry = max(retry, math.ceil(_SCAN_RATE_WINDOW_SECONDS - (now - hits[0])))
+            if retry:
+                for bucket, hits in windows.items():
+                    self._hits[bucket] = hits  # keep the pruning already done
+                return max(retry, 1)
+            for bucket, hits in windows.items():
+                hits.append(now)
+                self._hits[bucket] = hits
+            return 0
+
+
+_scan_limiter = _SlidingWindowLimiter()
+
+
+def require_scan_rate_limit(
+    request: Request,
+    x_api_key: str | None = Header(default=None),
+):
+    """Cap scan volume: SCAN_RATE_LIMIT_PER_HOUR scans per IP and per API key
+    (default 60, 0 disables), 429 + Retry-After past it. Ordered after
+    require_scan_key so a bad key is a 401 that never touches anyone's quota.
+
+    The IP bucket comes from X-Forwarded-For when present (Render proxies, so
+    request.client is the proxy) -- that header is client-controlled, but
+    spoofing it only mints a fresh IP bucket; the API-key bucket a valid key
+    charges is not spoofable, which is what actually caps the hosted bill.
+    """
+    try:
+        limit = int(os.getenv("SCAN_RATE_LIMIT_PER_HOUR", "60"))
+    except ValueError:
+        limit = 60
+    if limit <= 0:
+        return
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        client_ip = forwarded.split(",")[0].strip()
+    elif request.client:
+        client_ip = request.client.host
+    else:
+        client_ip = "unknown"
+    buckets = [f"ip:{client_ip}"] + ([f"key:{x_api_key}"] if x_api_key else [])
+    retry_after = _scan_limiter.record(buckets, limit)
+    if retry_after:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded: {limit} scans/hour, retry later",
+            headers={"Retry-After": str(retry_after)},
+        )
 
 
 # All 3 resolvers are live now (see schema.py) and read-only over telemetry
@@ -144,7 +237,7 @@ def _finalize(repo_path: str, findings: list[dict]) -> tuple[list[dict], int]:
     return kept, raw_total - len(kept)
 
 
-@app.post("/scan", response_model=ScanResponse, dependencies=[Depends(require_scan_key)])
+@app.post("/scan", response_model=ScanResponse, dependencies=[Depends(require_scan_key), Depends(require_scan_rate_limit)])
 async def scan(request: ScanRequest):
     repo_path = _resolve_repo_dir(request.repo_path)
     scan_id = telemetry.start_scan(repo_path, tool="rest:/scan")
@@ -166,7 +259,7 @@ class ScanUrlRequest(BaseModel):
     url: str
 
 
-@app.post("/scan/url", response_model=ScanResponse, dependencies=[Depends(require_scan_key)])
+@app.post("/scan/url", response_model=ScanResponse, dependencies=[Depends(require_scan_key), Depends(require_scan_rate_limit)])
 async def scan_url(request: ScanUrlRequest):
     """Clone a git URL into a scratch dir and run the same scan /scan does.
     Local-only feature (this server binds 127.0.0.1) -- equivalent to running
@@ -205,7 +298,7 @@ async def scan_url(request: ScanUrlRequest):
         shutil.rmtree(dest, ignore_errors=True)
 
 
-@app.post("/scan/diff", response_model=ScanResponse, dependencies=[Depends(require_scan_key)])
+@app.post("/scan/diff", response_model=ScanResponse, dependencies=[Depends(require_scan_key), Depends(require_scan_rate_limit)])
 async def scan_diff(request: DiffScanRequest):
     """Scan only files changed vs base_ref (default: uncommitted changes) instead
     of the whole repo -- for practical PR/CI use where re-scanning everything
@@ -241,7 +334,7 @@ async def scan_diff(request: DiffScanRequest):
     return ScanResponse(findings=kept, total=len(kept), ignored_count=ignored_count)
 
 
-@app.post("/scan/sarif", dependencies=[Depends(require_scan_key)])
+@app.post("/scan/sarif", dependencies=[Depends(require_scan_key), Depends(require_scan_rate_limit)])
 async def scan_sarif(request: ScanRequest):
     """Same scan, returned as SARIF 2.1.0 for GitHub Security tab / CI tooling."""
     repo_path = _resolve_repo_dir(request.repo_path)
