@@ -1,0 +1,5 @@
+# Card 200: vuln-hunter: vulnometry import never run on a real SARIF + stray nested vuln-hunter/vuln-hunter folder
+Work ONLY in /home/herdr/work/card200 (git worktree of vuln-hunter, branch card200). Source: vuln-hunter BUILDLOG.md Pending section (read it). Read the code first, confirm the problem still exists (if already fixed: comment STUCK already fixed with file:line, stop).
+1) Produce a real SARIF from a scan of this repo (semgrep --sarif), run the vulnometry import path added in 4dbbcce, fix what breaks, record output. 2) Inspect the stray nested vuln-hunter/vuln-hunter folder (own .git, old BUILDLOG 2026-07-09): report what it is; DO NOT delete it, list it in DONE for Chris to decide.
+Tests: repo uses test_*_manual.py scripts (no pytest suite); add one that fails before your fix. BUILDLOG.md entry at top (date/time CT, what, files, status).
+Save work (git commit) per step. Board comment 200 PROGRESS per step; DONE with files, test counts, sha; move 200 Review; STOP. Never push. Never review your own work. Do not ask for confirmation.
