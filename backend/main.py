@@ -186,7 +186,7 @@ async def scan_url(request: ScanUrlRequest):
         if clone.returncode != 0:
             raise HTTPException(status_code=400, detail=f"git clone failed: {clone.stderr.strip()[:500]}")
 
-        scan_id = telemetry.start_scan(dest, tool="rest:/scan/url")
+        scan_id = telemetry.start_scan(request.url.strip(), tool="rest:/scan/url")
         try:
             findings = all_scanners.run_full_scan(dest)
         except RuntimeError as e:
