@@ -15,6 +15,7 @@ from typing import Any, Dict, List
 
 RULES_DIR = Path(__file__).parent / "rules"
 DEFAULT_CONFIGS = [str(RULES_DIR / "custom-python-security.yml"), "p/security-audit", "p/secrets"]
+PHP_CONFIG = "p/php"
 
 # Never read the *contents* of these, regardless of .gitignore state — the whole
 # point of this tool is to avoid credentials ever reaching a snippet or the LLM.
@@ -29,6 +30,17 @@ NEVER_READ_PATTERNS = [
 # not just the filename, since NEVER_READ_PATTERNS alone never matches a file
 # merely because it lives inside one of these (path.name is the leaf, not the dir).
 EXCLUDE_DIRS = {"node_modules", ".venv", "venv", "dist", "build", "__pycache__", ".git"}
+
+
+def _has_php_files(target_path: str) -> bool:
+    """Check if target_path contains any *.php files (recursively)."""
+    root = Path(target_path)
+    if not root.exists():
+        return False
+    for php_file in root.rglob("*.php"):
+        if php_file.is_file() and not _is_never_read(php_file):
+            return True
+    return False
 
 
 def _is_never_read(path: Path) -> bool:
@@ -102,7 +114,10 @@ def run_scan(target_path: str, configs: List[str] | None = None, files: List[str
     if files is not None and len(files) == 0:
         return []  # diff-only scan with zero changed files -> nothing to scan, not "scan everything"
 
-    configs = configs or DEFAULT_CONFIGS
+    if configs is None:
+        configs = list(DEFAULT_CONFIGS)
+        if _has_php_files(target_path):
+            configs.append(PHP_CONFIG)
     cmd = [_semgrep_executable(), "scan"]
     for config in configs:
         cmd += ["--config", config]
