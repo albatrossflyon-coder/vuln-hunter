@@ -87,11 +87,21 @@ FALLBACK_PROVIDERS = [
 ]
 
 
-def _llm_client() -> OpenAI:
-    return OpenAI(
-        base_url="https://api.z.ai/api/paas/v4/",
-        api_key=os.getenv("ZAI_API_KEY"),
-    )
+def _llm_client() -> OpenAI | None:
+    api_key = os.getenv("ZAI_API_KEY")
+    if api_key:
+        return OpenAI(
+            base_url="https://api.z.ai/api/paas/v4/",
+            api_key=api_key,
+        )
+    for provider in FALLBACK_PROVIDERS:
+        key = os.getenv(provider["api_key_env"])
+        if key:
+            return OpenAI(
+                base_url=provider["base_url"],
+                api_key=key,
+            )
+    return None
 
 
 def _update_generation_from_completion(generation, response, *, model: str) -> None:
@@ -114,7 +124,7 @@ def _update_generation_from_completion(generation, response, *, model: str) -> N
     generation.update(model=model, output=content, usage_details=usage_details)
 
 
-def _call_with_retry(client: OpenAI, max_attempts: int = 5, **kwargs):
+def _call_with_retry(client: OpenAI | None, max_attempts: int = 5, **kwargs):
     """Groq's free tier is 12K TPM -- a real ceiling this codebase hits under
     concurrent load (confirmed 2026-08-10 on a full-repo scan), not a theoretical
     one. The SDK's built-in retries aren't enough on their own once several
@@ -126,36 +136,40 @@ def _call_with_retry(client: OpenAI, max_attempts: int = 5, **kwargs):
         input=kwargs.get("messages"),
     ) as generation:
         last_error = None
-        for attempt in range(max_attempts):
-            try:
-                response = client.chat.completions.create(**kwargs)
-                _update_generation_from_completion(generation, response, model=kwargs.get("model"))
-                return response
-            except openai.RateLimitError as e:
-                last_error = e
-                if attempt == max_attempts - 1:
+        if client is not None:
+            for attempt in range(max_attempts):
+                try:
+                    response = client.chat.completions.create(**kwargs)
+                    _update_generation_from_completion(generation, response, model=kwargs.get("model"))
+                    return response
+                except openai.RateLimitError as e:
+                    last_error = e
+                    if attempt == max_attempts - 1:
+                        break
+                    time.sleep(2 ** attempt * 3)  # 3, 6, 12, 24s
+                except openai.APIStatusError as e:
+                    # Non-rate-limit API error (model deprecated/renamed, bad
+                    # request, etc.) -- confirmed 2026-08-19 when Groq retired
+                    # llama-3.3-70b-versatile and this fell straight through the
+                    # RateLimitError-only catch above into an unhandled crash,
+                    # skipping the fallback chain entirely. Retrying the identical
+                    # request won't fix a model that doesn't exist, so go straight
+                    # to the fallback providers instead of burning the backoff window.
+                    last_error = e
                     break
-                time.sleep(2 ** attempt * 3)  # 3, 6, 12, 24s
-            except openai.APIStatusError as e:
-                # Non-rate-limit API error (model deprecated/renamed, bad
-                # request, etc.) -- confirmed 2026-08-19 when Groq retired
-                # llama-3.3-70b-versatile and this fell straight through the
-                # RateLimitError-only catch above into an unhandled crash,
-                # skipping the fallback chain entirely. Retrying the identical
-                # request won't fix a model that doesn't exist, so go straight
-                # to the fallback providers instead of burning the backoff window.
-                last_error = e
-                break
 
         # Groq's per-minute retries are exhausted, or the primary hit a
         # non-transient error above. Walk the fallback chain rather than
         # failing the scan.
         for provider in FALLBACK_PROVIDERS:
-            fallback_client = OpenAI(
-                base_url=provider["base_url"],
-                api_key=os.getenv(provider["api_key_env"]),
-            )
+            api_key = os.getenv(provider["api_key_env"])
+            if not api_key:
+                continue
             try:
+                fallback_client = OpenAI(
+                    base_url=provider["base_url"],
+                    api_key=api_key,
+                )
                 response = fallback_client.chat.completions.create(
                     **{**kwargs, **provider.get("extra", {}), "model": provider["model"]}
                 )
@@ -163,9 +177,10 @@ def _call_with_retry(client: OpenAI, max_attempts: int = 5, **kwargs):
                 return response
             except Exception:
                 continue
+
         if generation is not None:
             generation.update(level="ERROR", status_message=str(last_error) if last_error else "all providers exhausted")
-        raise last_error
+        return None
 
 
 # Bounded concurrency for triage calls: each is a separate LLM API request.
@@ -211,7 +226,19 @@ def triage_finding(finding: Dict[str, Any], model: str = TRIAGE_MODEL) -> Dict[s
     # blocks on every concurrent call finishing, one stuck request can stall
     # the whole scan_repo/scan_diff response for a long time, indistinguishable
     # from a hang. Bound it so a stuck call fails fast and visibly instead.
-    client = _llm_client()
+    try:
+        client = _llm_client()
+    except Exception:
+        client = None
+
+    if client is None and not any(os.getenv(p["api_key_env"]) for p in FALLBACK_PROVIDERS):
+        return {
+            **finding,
+            "exploitability": "unknown",
+            "explanation": "AI triage unavailable (no LLM API key configured). Finding is rule-confirmed by static scanner.",
+            "suggested_fix": "",
+            "finding_type": "rule_confirmed",
+        }
 
     user_message = (
         f"Rule: {finding['rule_id']}\n"
@@ -222,21 +249,8 @@ def triage_finding(finding: Dict[str, Any], model: str = TRIAGE_MODEL) -> Dict[s
     )
 
     # Handle empty responses: retry once, then fall back to unknown
-    response = _call_with_retry(
-        client,
-        model=model,
-        max_tokens=1200,
-        temperature=0,
-        timeout=60.0,
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_message},
-        ],
-    )
-    
-    # If first response is empty or has no choices, retry once
-    if response is None or not response.choices:
+    response = None
+    try:
         response = _call_with_retry(
             client,
             model=model,
@@ -249,11 +263,37 @@ def triage_finding(finding: Dict[str, Any], model: str = TRIAGE_MODEL) -> Dict[s
                 {"role": "user", "content": user_message},
             ],
         )
-    
+    except Exception as exc:
+        logger.warning("triage LLM call failed: %s", exc)
+
+    # If first response is empty or has no choices, retry once
+    if (response is None or not response.choices) and client is not None:
+        try:
+            response = _call_with_retry(
+                client,
+                model=model,
+                max_tokens=1200,
+                temperature=0,
+                timeout=60.0,
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_message},
+                ],
+            )
+        except Exception:
+            pass
+
     # If still no valid response, return finding with unknown exploitability
     if response is None or not response.choices:
-        return {**finding, "exploitability": "unknown", "explanation": "", "suggested_fix": "", "finding_type": "rule_confirmed"}
-    
+        return {
+            **finding,
+            "exploitability": "unknown",
+            "explanation": "AI triage unavailable (no LLM API key configured or LLM unreachable). Finding is rule-confirmed by static scanner.",
+            "suggested_fix": "",
+            "finding_type": "rule_confirmed",
+        }
+
     text = (response.choices[0].message.content or "").strip()
     parsed = _parse_json_response(text)
 

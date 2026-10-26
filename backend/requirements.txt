@@ -16,6 +16,8 @@ rich>=13.7.0
 
 # dev/test only
 jsonschema>=4.25.0
+requests>=2.28.0
+langfuse>=2.0.0
 
 # post-scan triage: turns results.sarif into business-prioritized findings
 # (Threat x Reachability x Consequence), not just severity. `vulnometry import
