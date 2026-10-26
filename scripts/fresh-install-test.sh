@@ -14,13 +14,15 @@ echo "=== Fresh Install Test ==="
 echo "Temporary directory: $TEMP_DIR"
 
 cleanup() {
-    echo "Cleaning up temporary directory: $TEMP_DIR"
-    rm -rf "$TEMP_DIR"
+    if [[ -n "${TEMP_DIR:-}" && -d "${TEMP_DIR:-}" ]]; then
+        echo "Cleaning up temporary directory: $TEMP_DIR"
+        rm -rf "$TEMP_DIR"
+    fi
 }
 trap cleanup EXIT
 
 echo "--- Step 1: Cloning repository into clean directory ---"
-git clone "$REPO_DIR" "$TEMP_DIR/clone"
+git clone --no-hardlinks "$REPO_DIR" "$TEMP_DIR/clone"
 cd "$TEMP_DIR/clone"
 
 echo "--- Step 2: Creating virtual environment ---"

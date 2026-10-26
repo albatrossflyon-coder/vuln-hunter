@@ -10,7 +10,7 @@ import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import openai
 try:
@@ -93,20 +93,13 @@ FALLBACK_PROVIDERS = [
 ]
 
 
-def _llm_client() -> OpenAI | None:
+def _llm_client() -> Optional[OpenAI]:
     api_key = os.getenv("ZAI_API_KEY")
     if api_key:
         return OpenAI(
             base_url="https://api.z.ai/api/paas/v4/",
             api_key=api_key,
         )
-    for provider in FALLBACK_PROVIDERS:
-        key = os.getenv(provider["api_key_env"])
-        if key:
-            return OpenAI(
-                base_url=provider["base_url"],
-                api_key=key,
-            )
     return None
 
 
@@ -130,7 +123,7 @@ def _update_generation_from_completion(generation, response, *, model: str) -> N
     generation.update(model=model, output=content, usage_details=usage_details)
 
 
-def _call_with_retry(client: OpenAI | None, max_attempts: int = 5, **kwargs):
+def _call_with_retry(client: Optional[OpenAI], max_attempts: int = 5, **kwargs):
     """Groq's free tier is 12K TPM -- a real ceiling this codebase hits under
     concurrent load (confirmed 2026-08-10 on a full-repo scan), not a theoretical
     one. The SDK's built-in retries aren't enough on their own once several
@@ -153,14 +146,7 @@ def _call_with_retry(client: OpenAI | None, max_attempts: int = 5, **kwargs):
                     if attempt == max_attempts - 1:
                         break
                     time.sleep(2 ** attempt * 3)  # 3, 6, 12, 24s
-                except openai.APIStatusError as e:
-                    # Non-rate-limit API error (model deprecated/renamed, bad
-                    # request, etc.) -- confirmed 2026-08-19 when Groq retired
-                    # llama-3.3-70b-versatile and this fell straight through the
-                    # RateLimitError-only catch above into an unhandled crash,
-                    # skipping the fallback chain entirely. Retrying the identical
-                    # request won't fix a model that doesn't exist, so go straight
-                    # to the fallback providers instead of burning the backoff window.
+                except Exception as e:
                     last_error = e
                     break
 
@@ -273,7 +259,7 @@ def triage_finding(finding: Dict[str, Any], model: str = TRIAGE_MODEL) -> Dict[s
         logger.warning("triage LLM call failed: %s", exc)
 
     # If first response is empty or has no choices, retry once
-    if (response is None or not response.choices) and client is not None:
+    if response is None or not response.choices:
         try:
             response = _call_with_retry(
                 client,
@@ -287,8 +273,8 @@ def triage_finding(finding: Dict[str, Any], model: str = TRIAGE_MODEL) -> Dict[s
                     {"role": "user", "content": user_message},
                 ],
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("triage LLM retry failed: %s", exc)
 
     # If still no valid response, return finding with unknown exploitability
     if response is None or not response.choices:
