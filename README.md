@@ -138,8 +138,8 @@ Then just ask Claude Code to scan a repo or a diff — it'll call the tool direc
 
 - `scan_diff` never runs the gitleaks history scan — a whole-git-history secret check doesn't map onto "just this diff" (an old secret from 5 commits back has nothing to do with what changed now); catching secrets introduced by the diff itself specifically would need gitleaks scoped to the commit range, not built yet
 - Only Python has custom rules written/tested so far (community packs cover other languages, but with the same blind spots noted above)
-- No formal test suite yet — manual smoke tests only (`test_*.py` in `backend/`)
-- Not yet deployed anywhere — runs locally
+- Automated installation test suite in `scripts/fresh-install-test.sh`; manual smoke tests in `backend/` (`test_*.py`)
+- Live demo frontend deployed to Vercel (see Live Demo above); backend runs locally or self-hosted to scan local filesystems without transmitting code off-machine
 - `deep_review` (the business-logic pass) is API-only right now; no frontend toggle for it yet, and the diff-scan endpoint has no dedicated UI either
 
 ---
