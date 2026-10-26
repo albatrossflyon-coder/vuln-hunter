@@ -23,8 +23,12 @@ FAKE_TOKEN = f"figd_{secrets.token_hex(20)}"
 # Skip gracefully if gitleaks isn't installed -- matches run_gitleaks_scan's
 # own degrade-gracefully behavior rather than failing the whole check.
 if shutil.which("gitleaks") is None:
-    print("test_gitleaks: SKIPPED (gitleaks not on PATH)")
-    raise SystemExit(0)
+    try:
+        import pytest
+        pytest.skip("gitleaks not on PATH", allow_module_level=True)
+    except Exception:
+        print("test_gitleaks: SKIPPED (gitleaks not on PATH)")
+        sys.exit(0)
 
 with tempfile.TemporaryDirectory() as tmpdir:
     repo = Path(tmpdir)

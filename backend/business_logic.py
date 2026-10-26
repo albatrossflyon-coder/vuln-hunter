@@ -12,12 +12,15 @@ class of bug rules can't see: it can be wrong, and must say so honestly.
 """
 
 import json
+import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List
 
-from triage import TRIAGE_MODEL, _call_with_retry, _llm_client
+from triage import FALLBACK_PROVIDERS, TRIAGE_MODEL, _call_with_retry, _llm_client
+
+logger = logging.getLogger(__name__)
 
 # Bounded concurrency, same reasoning as triage.py's MAX_CONCURRENT_TRIAGE
 # (including the 5 -> 3 drop after the Groq TPM ceiling was hit 2026-08-10):
@@ -75,21 +78,16 @@ def review_file(file_path: str, model: str = TRIAGE_MODEL) -> List[Dict[str, Any
 
     # ponytail: see triage.py's triage_finding for why this needs a bound --
     # same blocking-pool-of-concurrent-calls shape, same fix.
-    client = _llm_client()
-    response = _call_with_retry(
-        client,
-        model=model,
-        max_tokens=1200,
-        temperature=0,
-        timeout=60.0,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"File: {path.name}\n\n{numbered}"},
-        ],
-    )
+    try:
+        client = _llm_client()
+    except Exception:
+        client = None
 
-    # If first response is None or has no choices, retry once
-    if response is None or not response.choices:
+    if client is None and not any(os.getenv(p["api_key_env"]) for p in FALLBACK_PROVIDERS):
+        return []
+
+    response = None
+    try:
         response = _call_with_retry(
             client,
             model=model,
@@ -101,6 +99,23 @@ def review_file(file_path: str, model: str = TRIAGE_MODEL) -> List[Dict[str, Any
                 {"role": "user", "content": f"File: {path.name}\n\n{numbered}"},
             ],
         )
+
+        # If first response is None or has no choices, retry once
+        if response is None or not response.choices:
+            response = _call_with_retry(
+                client,
+                model=model,
+                max_tokens=1200,
+                temperature=0,
+                timeout=60.0,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": f"File: {path.name}\n\n{numbered}"},
+                ],
+            )
+    except Exception as exc:
+        logger.warning("business logic LLM call failed for %s: %s", path, exc)
+        return []
 
     # If still no valid response, return empty -- one file's LLM failure
     # must never discard findings from other files.
