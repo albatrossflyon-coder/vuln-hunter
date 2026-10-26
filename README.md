@@ -86,6 +86,12 @@ Next.js 16 + Tailwind 4 dashboard — repo-path input, scan button, findings lis
 
 ## Quick Start
 
+### Requirements & Supported Platforms
+
+- **Python**: Supported on Python 3.10 through 3.13 (Python 3.11 or 3.12 recommended). Python 3.14 lacks prebuilt Semgrep wheels and is currently unsupported.
+- **Windows**: Semgrep requires Linux or WSL (Windows Subsystem for Linux). On Windows, run vuln-hunter inside WSL (e.g. Ubuntu on WSL2) rather than native Command Prompt or PowerShell, as Semgrep does not provide prebuilt Windows wheels for modern Python versions.
+- **Linux & macOS**: Supported natively.
+
 ```bash
 # Backend
 cd backend

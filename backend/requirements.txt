@@ -1,3 +1,5 @@
+# Supported Python: 3.10 - 3.13 (3.11 or 3.12 recommended; 3.14 lacks prebuilt semgrep wheels)
+# Windows users: run via WSL (semgrep requires Linux/WSL)
 fastapi>=0.104.1
 uvicorn[standard]>=0.24.0
 pydantic>=2.5.0
