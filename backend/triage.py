@@ -13,7 +13,10 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List
 
 import openai
-from langfuse import get_client
+try:
+    from langfuse import get_client
+except ImportError:
+    get_client = None
 from openai import OpenAI
 
 logger = logging.getLogger(__name__)
@@ -22,11 +25,14 @@ logger = logging.getLogger(__name__)
 @contextlib.contextmanager
 def _triage_observation(**kwargs):
     """Langfuse generation span for one triage call, fail-open. Telemetry must
-    never break a scan: if langfuse is misconfigured or its endpoint is
-    unreachable (e.g. a stale LANGFUSE_BASE_URL inherited from another app on
-    the same machine), yield None and let triage run untraced. Both span
-    creation and the flush on span close are guarded -- the flush can raise a
-    ConnectionError well after the LLM call already succeeded."""
+    never break a scan: if langfuse is misconfigured, not installed, or its
+    endpoint is unreachable (e.g. a stale LANGFUSE_BASE_URL inherited from
+    another app on the same machine), yield None and let triage run untraced.
+    Both span creation and the flush on span close are guarded -- the flush can
+    raise a ConnectionError well after the LLM call already succeeded."""
+    if get_client is None:
+        yield None
+        return
     try:
         cm = get_client().start_as_current_observation(as_type="generation", **kwargs)
     except Exception as exc:  # noqa: BLE001 -- any langfuse/OTel failure is non-fatal here
