@@ -4,9 +4,9 @@ SARIF 2.1.0 JSON schema (fetched live) -- not just structurally eyeballed.
 
 import json
 import sys
-import urllib.request
 
 import jsonschema
+import requests
 
 from sarif import to_sarif
 from scanner import run_scan
@@ -18,8 +18,9 @@ if sys.stdout.encoding != "utf-8":
 
 
 def main():
-    with urllib.request.urlopen(SCHEMA_URL, timeout=30) as response:
-        schema = json.loads(response.read())
+    resp = requests.get(SCHEMA_URL, timeout=30)
+    resp.raise_for_status()
+    schema = resp.json()
 
     findings = run_scan("test_sample/vulnerable.py")
     # Fill in placeholder triage fields — schema validation doesn't need real

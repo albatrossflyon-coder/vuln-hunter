@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
 import psutil
+import requests
 
 import ignore_store
 from ignore_store import fingerprint
@@ -65,16 +66,17 @@ def _push_remote(payload: Dict[str, Any]) -> None:
 
     def _send() -> None:
         try:
-            req = urllib.request.Request(
+            if not (remote_url.startswith("http://") or remote_url.startswith("https://")):
+                return
+            headers = {"Content-Type": "application/json"}
+            if api_key:
+                headers["X-API-Key"] = api_key
+            requests.post(
                 remote_url.rstrip("/") + "/telemetry/ingest",
-                data=json.dumps(payload, default=str).encode("utf-8"),
-                headers={
-                    "Content-Type": "application/json",
-                    **({"X-API-Key": api_key} if api_key else {}),
-                },
-                method="POST",
+                data=json.dumps(payload, default=str),
+                headers=headers,
+                timeout=5,
             )
-            urllib.request.urlopen(req, timeout=5)
         except Exception:
             pass  # ponytail: best-effort mirror, a dead/sleeping remote must never affect the local scan
 
